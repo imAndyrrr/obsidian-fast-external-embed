@@ -1,0 +1,26 @@
+{
+  "name": "obsidian-fast-external-embed",
+  "version": "1.0.0",
+  "description": "Native syntax embed for external local files and web links with near-instant speed",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "pdf",
+    "embed",
+    "external"
+  ],
+  "author": "Andy",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.20.0",
+    "obsidian": "latest",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3"
+  }
+}

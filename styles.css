@@ -1,0 +1,103 @@
+/* Fast External Embed 样式 */
+
+.fast-external-embed-container {
+  position: relative;
+  margin: 1em 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: var(--background-secondary);
+  transition: border-color 0.2s ease;
+}
+
+.fast-external-embed-container:hover {
+  border-color: var(--interactive-accent);
+}
+
+.fast-external-embed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background-color: var(--background-secondary-alt);
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: 0.85em;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.fast-external-embed-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.fast-external-embed-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.fast-external-embed-btn {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 0.85em;
+  line-height: 1.2;
+  transition: background 0.15s ease;
+}
+
+.fast-external-embed-btn:hover {
+  background: var(--interactive-hover);
+  color: var(--text-accent);
+}
+
+.fast-external-embed-body {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.fast-external-embed-pdf {
+  width: 100%;
+  height: var(--fast-embed-pdf-height, 75vh);
+  border: none;
+  display: block;
+}
+
+.fast-external-embed-img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+.fast-external-embed-media {
+  width: 100%;
+  max-height: 70vh;
+  display: block;
+}
+
+.fast-external-embed-error {
+  padding: 12px 16px;
+  color: var(--text-error);
+  font-size: 0.9em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fast-external-embed-error code {
+  color: var(--text-muted);
+  background-color: var(--background-primary);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
