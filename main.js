@@ -249,13 +249,10 @@ var EmbedRenderer = class {
         const imgEmbed = container.closest(".image-embed");
         const imgWrapper = container.closest(".image-wrapper");
         if (imgEmbed) {
-          imgEmbed.style.width = "100%";
-          imgEmbed.style.maxWidth = "none";
-          imgEmbed.style.display = "block";
+          imgEmbed.addClass("fast-external-embed-host");
         }
         if (imgWrapper) {
-          imgWrapper.style.width = "100%";
-          imgWrapper.style.maxWidth = "none";
+          imgWrapper.addClass("fast-external-embed-host");
         }
         if (customWidth !== "100%")
           iframe.style.width = customWidth;

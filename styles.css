@@ -16,8 +16,8 @@
 }
 
 /* Obsidian 自带的外层容器不画框，避免和插件容器叠出多层边框 */
-.image-embed:has(.fast-external-embed-container),
-.image-wrapper:has(.fast-external-embed-container) {
+.image-embed.fast-external-embed-host,
+.image-wrapper.fast-external-embed-host {
   display: block !important;
   width: 100% !important;
   max-width: 100% !important;

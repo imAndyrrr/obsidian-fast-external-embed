@@ -1,7 +1,7 @@
 {
   "id": "fast-external-embed",
   "name": "Fast External Embed",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "1.0.0",
   "description": "Embed external web pages and local files with standard Markdown and wiki embed syntax.",
   "author": "Andy",
