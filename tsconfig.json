@@ -9,6 +9,7 @@
     "experimentalDecorators": true,
     "strict": false,
     "noImplicitAny": false,
+    "skipLibCheck": true,
     "moduleResolution": "node",
     "importHelpers": true,
     "lib": [

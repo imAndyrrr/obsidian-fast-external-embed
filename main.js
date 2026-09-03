@@ -240,9 +240,9 @@ var EmbedRenderer = class {
           attr: {
             src: fullUrl,
             frameborder: "0",
-            allow: "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share",
+            allow: "autoplay; fullscreen; picture-in-picture",
             allowfullscreen: "true",
-            sandbox: "allow-forms allow-presentation allow-same-origin allow-scripts allow-downloads allow-modals allow-popups"
+            sandbox: "allow-forms allow-presentation allow-scripts"
           }
         });
         iframe.style.height = customHeight;
@@ -403,7 +403,9 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     this.registerMarkdownPostProcessor((element, context) => {
       this.scanAndReplaceEmbeds(element);
     });
-    this.startDOMObserver();
+    if (this.settings.enableLivePreview) {
+      this.startDOMObserver();
+    }
     this.registerDomEvent(document, "click", (evt) => {
       const target = evt.target;
       if (!target)
@@ -424,7 +426,6 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
       }
     }, true);
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
-    console.log("Fast External Embed \u63D2\u4EF6\u5DF2\u5C31\u7EEA");
   }
   onunload() {
     if (this.observer) {
@@ -543,7 +544,6 @@ var FastExternalEmbedSettingTab = class extends import_obsidian2.PluginSettingTa
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Fast External Embed \u8BBE\u7F6E" });
     new import_obsidian2.Setting(containerEl).setName("\u663E\u793A\u9876\u90E8\u4FE1\u606F\u680F\u4E0E\u5FEB\u6377\u6309\u94AE").setDesc("\u5728\u5D4C\u5165\u5185\u5BB9\u4E0A\u65B9\u663E\u793A\u6587\u4EF6\u540D/\u7F51\u5740\u3001\u5728\u9ED8\u8BA4\u5E94\u7528\u4E2D\u6253\u5F00\u3001\u5B9A\u4F4D\u6587\u4EF6\u6216\u5237\u65B0\u6309\u94AE\u3002").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showHeader).onChange(async (val) => {
         this.plugin.settings.showHeader = val;

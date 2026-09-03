@@ -6,7 +6,6 @@ import {
   Setting,
 } from "obsidian";
 import { EmbedRenderer } from "./renderer";
-import { buildEditorExtension } from "./editorExtension";
 
 interface FastExternalEmbedSettings {
   showHeader: boolean;
@@ -38,8 +37,10 @@ export default class FastExternalEmbedPlugin extends Plugin {
       this.scanAndReplaceEmbeds(element);
     });
 
-    // 2. 启动轻量高效 DOM 监听，接管 Live Preview / 动态渲染中的未解析占位符
-    this.startDOMObserver();
+    // 2. 启动轻量 DOM 监听，接管 Live Preview / 动态渲染中的未解析占位符
+    if (this.settings.enableLivePreview) {
+      this.startDOMObserver();
+    }
 
     // 3. 全局拦截外部链接点击（防止点击 [[C:/...]] 或 file:/// 时在仓库内创建空白笔记）
     this.registerDomEvent(document, "click", (evt: MouseEvent) => {
@@ -64,7 +65,6 @@ export default class FastExternalEmbedPlugin extends Plugin {
     // 4. 注册设置面板
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
 
-    console.log("Fast External Embed 插件已就绪");
   }
 
   onunload() {
@@ -205,8 +205,6 @@ class FastExternalEmbedSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-
-    containerEl.createEl("h2", { text: "Fast External Embed 设置" });
 
     new Setting(containerEl)
       .setName("显示顶部信息栏与快捷按钮")

@@ -1,9 +1,9 @@
 {
-  "id": "obsidian-fast-external-embed",
+  "id": "fast-external-embed",
   "name": "Fast External Embed",
   "version": "1.0.0",
   "minAppVersion": "1.0.0",
-  "description": "Native syntax embed for external local files and web links with near-instant speed",
+  "description": "Embed external web pages and local files with standard Markdown and wiki embed syntax",
   "author": "Andy",
   "isDesktopOnly": true
 }

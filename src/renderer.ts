@@ -243,9 +243,9 @@ export class EmbedRenderer {
           attr: {
             src: fullUrl,
             frameborder: "0",
-            allow: "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share",
+            allow: "autoplay; fullscreen; picture-in-picture",
             allowfullscreen: "true",
-            sandbox: "allow-forms allow-presentation allow-same-origin allow-scripts allow-downloads allow-modals allow-popups",
+            sandbox: "allow-forms allow-presentation allow-scripts",
           },
         });
         iframe.style.height = customHeight;
