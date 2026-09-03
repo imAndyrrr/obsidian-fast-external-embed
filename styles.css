@@ -1,9 +1,7 @@
 /* Fast External Embed 样式 */
 
 .fast-external-embed-container,
-.file-embed.fast-external-embed-container,
-.image-embed:has(.fast-external-embed-container),
-.image-wrapper:has(.fast-external-embed-container) {
+.file-embed.fast-external-embed-container {
   display: block !important;
   width: 100% !important;
   max-width: 100% !important;
@@ -15,6 +13,20 @@
   color: var(--text-normal) !important;
   background-color: var(--background-secondary);
   transition: border-color 0.2s ease;
+}
+
+/* Obsidian 自带的外层容器不画框，避免和插件容器叠出多层边框 */
+.image-embed:has(.fast-external-embed-container),
+.image-wrapper:has(.fast-external-embed-container) {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
 }
 
 /* 嵌入网页 iframe 默认撑满容器宽度 */
