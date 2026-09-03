@@ -1,6 +1,6 @@
 {
   "name": "obsidian-fast-external-embed",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Embed external web pages and local files with standard Markdown and wiki embed syntax.",
   "main": "main.js",
   "scripts": {
@@ -22,9 +22,5 @@
     "obsidian": "latest",
     "tslib": "^2.6.2",
     "typescript": "^5.3.3"
-  },
-  "dependencies": {
-    "@codemirror/state": "^6.7.2",
-    "@codemirror/view": "^6.43.11"
   }
 }
