@@ -60,10 +60,6 @@ export function buildEditorExtension(renderer: EmbedRenderer) {
         const state = view.state;
         const selection = state.selection.main;
 
-        // 获取当前光标所在的行号范围，光标所在行保持原文本不渲染，方便用户编辑
-        const cursorLineStart = state.doc.lineAt(selection.from).from;
-        const cursorLineEnd = state.doc.lineAt(selection.to).to;
-
         for (const { from, to } of view.visibleRanges) {
           const text = state.sliceDoc(from, to);
 
@@ -74,11 +70,8 @@ export function buildEditorExtension(renderer: EmbedRenderer) {
             const matchStart = from + match.index;
             const matchEnd = matchStart + match[0].length;
 
-            // 如果光标在该行，跳过替换
+            // 只有当光标精确位于该链接内部时才显示为纯文本，否则直接渲染 Widget
             if (selection.from <= matchEnd && selection.to >= matchStart) {
-              continue;
-            }
-            if (matchStart >= cursorLineStart && matchEnd <= cursorLineEnd) {
               continue;
             }
 
@@ -99,11 +92,8 @@ export function buildEditorExtension(renderer: EmbedRenderer) {
             const matchStart = from + match.index;
             const matchEnd = matchStart + match[0].length;
 
-            // 如果光标在该行，跳过替换
+            // 只有当光标精确位于该链接内部时才显示为纯文本，否则直接渲染 Widget
             if (selection.from <= matchEnd && selection.to >= matchStart) {
-              continue;
-            }
-            if (matchStart >= cursorLineStart && matchEnd <= cursorLineEnd) {
               continue;
             }
 

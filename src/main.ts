@@ -25,6 +25,8 @@ const DEFAULT_SETTINGS: FastExternalEmbedSettings = {
 export default class FastExternalEmbedPlugin extends Plugin {
   settings: FastExternalEmbedSettings;
   renderer: EmbedRenderer;
+  private observer: MutationObserver | null = null;
+  private scanTimer: any = null;
 
   async onload() {
     await this.loadSettings();
@@ -33,13 +35,16 @@ export default class FastExternalEmbedPlugin extends Plugin {
 
     // 1. 注册 Reading View（阅读模式）后处理器
     this.registerMarkdownPostProcessor((element: HTMLElement, context: MarkdownPostProcessorContext) => {
-      this.processReadingMode(element, context);
+      this.scanAndReplaceEmbeds(element);
     });
 
     // 2. 注册 Live Preview（实时预览）CodeMirror 6 扩展
     if (this.settings.enableLivePreview) {
       this.registerEditorExtension(buildEditorExtension(this.renderer));
     }
+
+    // 3. 启动全局 MutationObserver，实时捕获 Live Preview 中的未解析嵌入与“找不到文件”占位符
+    this.startGlobalObserver();
 
     // 3. 注册设置面板
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
@@ -48,6 +53,13 @@ export default class FastExternalEmbedPlugin extends Plugin {
   }
 
   onunload() {
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+    if (this.scanTimer) {
+      clearTimeout(this.scanTimer);
+    }
     if (this.renderer) {
       this.renderer.cleanup();
     }
@@ -62,24 +74,75 @@ export default class FastExternalEmbedPlugin extends Plugin {
   }
 
   /**
-   * 处理阅读模式下的 DOM 元素
+   * 启动全局 DOM 监听，接管 Live Preview 中生成的未解析文件占位符
    */
-  private processReadingMode(element: HTMLElement, context: MarkdownPostProcessorContext) {
-    // 1. 处理 ![[...]] 语法生成的 internal-embed
-    const internalEmbeds = element.querySelectorAll<HTMLElement>(".internal-embed");
-    internalEmbeds.forEach((embedEl) => {
-      const src = embedEl.getAttribute("src");
+  private startGlobalObserver() {
+    this.observer = new MutationObserver((mutations) => {
+      let shouldScan = false;
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length > 0) {
+          shouldScan = true;
+          break;
+        }
+      }
+      if (shouldScan) {
+        this.debouncedScan();
+      }
+    });
+
+    this.observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    // 首次加载时立刻执行一次全文档扫描
+    setTimeout(() => {
+      this.scanAndReplaceEmbeds(document.body);
+    }, 500);
+  }
+
+  private debouncedScan() {
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = setTimeout(() => {
+      this.scanAndReplaceEmbeds(document.body);
+    }, 100);
+  }
+
+  /**
+   * 扫描并替换 DOM 元素中的外部嵌入（同时适用于阅读视图和实时预览）
+   */
+  private scanAndReplaceEmbeds(root: HTMLElement) {
+    // 1. 处理 ![[...]] 语法生成的 internal-embed 或 file-embed（包括“找不到文件”报错元素）
+    const embedEls = root.querySelectorAll<HTMLElement>(
+      ".internal-embed:not([data-fast-embed-processed]), .file-embed:not([data-fast-embed-processed])"
+    );
+
+    embedEls.forEach((embedEl) => {
+      let src = embedEl.getAttribute("src");
       const alt = embedEl.getAttribute("alt") || undefined;
+
+      // 如果没有 src 属性，尝试从元素内的文字中提取路径（例如 找不到“C:/...”。）
+      if (!src) {
+        const text = embedEl.innerText || embedEl.textContent || "";
+        const parsedFromText = this.renderer.parseTarget(text, alt);
+        if (parsedFromText) {
+          embedEl.setAttribute("data-fast-embed-processed", "true");
+          this.renderer.render(parsedFromText, embedEl);
+          return;
+        }
+      }
+
       if (!src) return;
 
       const parsed = this.renderer.parseTarget(src, alt);
       if (parsed) {
+        embedEl.setAttribute("data-fast-embed-processed", "true");
         this.renderer.render(parsed, embedEl);
       }
     });
 
-    // 2. 处理 ![](...) 标准 Markdown 语法生成的 img 标签
-    const imgs = element.querySelectorAll<HTMLImageElement>("img");
+    // 2. 处理 ![](...) 外部网页、本地外部 PDF/音视频生成的不兼容 img 标签
+    const imgs = root.querySelectorAll<HTMLImageElement>("img:not([data-fast-embed-processed])");
     imgs.forEach((img) => {
       const src = img.getAttribute("src");
       const alt = img.getAttribute("alt") || undefined;
@@ -87,9 +150,9 @@ export default class FastExternalEmbedPlugin extends Plugin {
 
       const parsed = this.renderer.parseTarget(src, alt);
       if (parsed) {
-        // 如果是普通网页、PDF、视频或音频，img 标签无法正确显示，替换为原生容器
         const nonImgExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
         if (parsed.isHttp || nonImgExts.includes(parsed.extension)) {
+          img.setAttribute("data-fast-embed-processed", "true");
           const container = document.createElement("div");
           img.replaceWith(container);
           this.renderer.render(parsed, container);

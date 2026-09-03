@@ -58,6 +58,10 @@ var EmbedRenderer = class {
     if (!target)
       return null;
     let str = target.trim();
+    const notFoundMatch = str.match(/^(?:找不到[“"]|Unable to find ["'])([^”"']+)[”"']/);
+    if (notFoundMatch) {
+      str = notFoundMatch[1].trim();
+    }
     if (str.startsWith('"') && str.endsWith('"') || str.startsWith("'") && str.endsWith("'")) {
       str = str.slice(1, -1).trim();
     }
@@ -68,10 +72,11 @@ var EmbedRenderer = class {
     if (!isHttp && !isFileProtocol && !isWinAbsolute && !isUnixAbsolute) {
       return null;
     }
-    const hashIndex = str.indexOf("#");
     let cleanTarget = str;
     let hash = "";
     const params = {};
+    const lastSlash = Math.max(str.lastIndexOf("/"), str.lastIndexOf("\\"));
+    const hashIndex = str.indexOf("#", lastSlash === -1 ? 0 : lastSlash);
     if (hashIndex !== -1) {
       cleanTarget = str.substring(0, hashIndex);
       hash = str.substring(hashIndex + 1);
@@ -87,6 +92,7 @@ var EmbedRenderer = class {
       if (/^[a-zA-Z]:/.test(cleanTarget)) {
         cleanTarget = cleanTarget.replace(/^\//, "");
       }
+      cleanTarget = decodeURIComponent(cleanTarget);
     }
     if (!isHttp) {
       cleanTarget = path.normalize(cleanTarget);
@@ -383,8 +389,6 @@ function buildEditorExtension(renderer) {
         const builder = new import_state.RangeSetBuilder();
         const state = view.state;
         const selection = state.selection.main;
-        const cursorLineStart = state.doc.lineAt(selection.from).from;
-        const cursorLineEnd = state.doc.lineAt(selection.to).to;
         for (const { from, to } of view.visibleRanges) {
           const text = state.sliceDoc(from, to);
           const wikiRegex = /!\[\[(.*?)\]\]/g;
@@ -393,9 +397,6 @@ function buildEditorExtension(renderer) {
             const matchStart = from + match.index;
             const matchEnd = matchStart + match[0].length;
             if (selection.from <= matchEnd && selection.to >= matchStart) {
-              continue;
-            }
-            if (matchStart >= cursorLineStart && matchEnd <= cursorLineEnd) {
               continue;
             }
             const target = match[1];
@@ -413,9 +414,6 @@ function buildEditorExtension(renderer) {
             const matchStart = from + match.index;
             const matchEnd = matchStart + match[0].length;
             if (selection.from <= matchEnd && selection.to >= matchStart) {
-              continue;
-            }
-            if (matchStart >= cursorLineStart && matchEnd <= cursorLineEnd) {
               continue;
             }
             const altText = match[1];
@@ -447,19 +445,32 @@ var DEFAULT_SETTINGS = {
   enableLivePreview: true
 };
 var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
+  constructor() {
+    super(...arguments);
+    this.observer = null;
+    this.scanTimer = null;
+  }
   async onload() {
     await this.loadSettings();
     this.renderer = new EmbedRenderer((key) => this.settings[key]);
     this.registerMarkdownPostProcessor((element, context) => {
-      this.processReadingMode(element, context);
+      this.scanAndReplaceEmbeds(element);
     });
     if (this.settings.enableLivePreview) {
       this.registerEditorExtension(buildEditorExtension(this.renderer));
     }
+    this.startGlobalObserver();
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
     console.log("Fast External Embed \u63D2\u4EF6\u5DF2\u5C31\u7EEA");
   }
   onunload() {
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+    if (this.scanTimer) {
+      clearTimeout(this.scanTimer);
+    }
     if (this.renderer) {
       this.renderer.cleanup();
     }
@@ -471,21 +482,64 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     await this.saveData(this.settings);
   }
   /**
-   * 处理阅读模式下的 DOM 元素
+   * 启动全局 DOM 监听，接管 Live Preview 中生成的未解析文件占位符
    */
-  processReadingMode(element, context) {
-    const internalEmbeds = element.querySelectorAll(".internal-embed");
-    internalEmbeds.forEach((embedEl) => {
-      const src = embedEl.getAttribute("src");
+  startGlobalObserver() {
+    this.observer = new MutationObserver((mutations) => {
+      let shouldScan = false;
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length > 0) {
+          shouldScan = true;
+          break;
+        }
+      }
+      if (shouldScan) {
+        this.debouncedScan();
+      }
+    });
+    this.observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+    setTimeout(() => {
+      this.scanAndReplaceEmbeds(document.body);
+    }, 500);
+  }
+  debouncedScan() {
+    if (this.scanTimer)
+      clearTimeout(this.scanTimer);
+    this.scanTimer = setTimeout(() => {
+      this.scanAndReplaceEmbeds(document.body);
+    }, 100);
+  }
+  /**
+   * 扫描并替换 DOM 元素中的外部嵌入（同时适用于阅读视图和实时预览）
+   */
+  scanAndReplaceEmbeds(root) {
+    const embedEls = root.querySelectorAll(
+      ".internal-embed:not([data-fast-embed-processed]), .file-embed:not([data-fast-embed-processed])"
+    );
+    embedEls.forEach((embedEl) => {
+      let src = embedEl.getAttribute("src");
       const alt = embedEl.getAttribute("alt") || void 0;
+      if (!src) {
+        const text = embedEl.innerText || embedEl.textContent || "";
+        const parsedFromText = this.renderer.parseTarget(text, alt);
+        if (parsedFromText) {
+          embedEl.setAttribute("data-fast-embed-processed", "true");
+          this.renderer.render(parsedFromText, embedEl);
+          return;
+        }
+      }
       if (!src)
         return;
       const parsed = this.renderer.parseTarget(src, alt);
       if (parsed) {
+        embedEl.setAttribute("data-fast-embed-processed", "true");
         this.renderer.render(parsed, embedEl);
       }
     });
-    const imgs = element.querySelectorAll("img");
+    const imgs = root.querySelectorAll("img:not([data-fast-embed-processed])");
     imgs.forEach((img) => {
       const src = img.getAttribute("src");
       const alt = img.getAttribute("alt") || void 0;
@@ -495,6 +549,7 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
       if (parsed) {
         const nonImgExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
         if (parsed.isHttp || nonImgExts.includes(parsed.extension)) {
+          img.setAttribute("data-fast-embed-processed", "true");
           const container = document.createElement("div");
           img.replaceWith(container);
           this.renderer.render(parsed, container);

@@ -28,6 +28,12 @@ export class EmbedRenderer {
     if (!target) return null;
     let str = target.trim();
 
+    // 如果是 Obsidian 报错信息："找不到“...”" 或 "Unable to find "...""
+    const notFoundMatch = str.match(/^(?:找不到[“"]|Unable to find ["'])([^”"']+)[”"']/);
+    if (notFoundMatch) {
+      str = notFoundMatch[1].trim();
+    }
+
     // 去除多余的引号
     if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
       str = str.slice(1, -1).trim();
@@ -43,10 +49,14 @@ export class EmbedRenderer {
     }
 
     // 分离 hash 与参数（例如 #page=3&height=500px）
-    const hashIndex = str.indexOf("#");
+    // 注意：文件夹名称中可能含有 #（如 C:/#Self/...），所以 hash 只能位于文件名末尾！
     let cleanTarget = str;
     let hash = "";
     const params: Record<string, string> = {};
+
+    // 寻找最后一个路径分隔符之后出现的 '#'
+    const lastSlash = Math.max(str.lastIndexOf("/"), str.lastIndexOf("\\"));
+    const hashIndex = str.indexOf("#", lastSlash === -1 ? 0 : lastSlash);
 
     if (hashIndex !== -1) {
       cleanTarget = str.substring(0, hashIndex);
@@ -66,6 +76,7 @@ export class EmbedRenderer {
       if (/^[a-zA-Z]:/.test(cleanTarget)) {
         cleanTarget = cleanTarget.replace(/^\//, "");
       }
+      cleanTarget = decodeURIComponent(cleanTarget);
     }
 
     if (!isHttp) {
