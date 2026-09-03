@@ -1,9 +1,12 @@
 /* Fast External Embed 样式 */
 
 .fast-external-embed-container,
-.file-embed.fast-external-embed-container {
+.file-embed.fast-external-embed-container,
+.image-embed:has(.fast-external-embed-container),
+.image-wrapper:has(.fast-external-embed-container) {
   display: block !important;
   width: 100% !important;
+  max-width: 100% !important;
   position: relative;
   margin: 1em 0;
   border: 1px solid var(--background-modifier-border);
@@ -12,6 +15,14 @@
   color: var(--text-normal) !important;
   background-color: var(--background-secondary);
   transition: border-color 0.2s ease;
+}
+
+/* 嵌入网页 iframe 默认撑满容器宽度 */
+.fast-external-embed-iframe {
+  display: block;
+  border: none;
+  border-radius: 0;
+  width: 100% !important;
 }
 
 .fast-external-embed-container:hover {

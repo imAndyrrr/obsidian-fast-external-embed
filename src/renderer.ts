@@ -249,7 +249,19 @@ export class EmbedRenderer {
           },
         });
         iframe.style.height = customHeight;
-        iframe.style.width = customWidth;
+        // 让外层 image-embed/image-wrapper 容器也撑满可用宽度
+        const imgEmbed = container.closest(".image-embed") as HTMLElement | null;
+        const imgWrapper = container.closest(".image-wrapper") as HTMLElement | null;
+        if (imgEmbed) {
+          imgEmbed.style.width = "100%";
+          imgEmbed.style.maxWidth = "none";
+          imgEmbed.style.display = "block";
+        }
+        if (imgWrapper) {
+          imgWrapper.style.width = "100%";
+          imgWrapper.style.maxWidth = "none";
+        }
+        if (customWidth !== "100%") iframe.style.width = customWidth;
       } else {
         body.createEl("div", {
           cls: "fast-external-embed-error",

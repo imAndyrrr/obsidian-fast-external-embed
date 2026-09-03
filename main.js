@@ -246,7 +246,19 @@ var EmbedRenderer = class {
           }
         });
         iframe.style.height = customHeight;
-        iframe.style.width = customWidth;
+        const imgEmbed = container.closest(".image-embed");
+        const imgWrapper = container.closest(".image-wrapper");
+        if (imgEmbed) {
+          imgEmbed.style.width = "100%";
+          imgEmbed.style.maxWidth = "none";
+          imgEmbed.style.display = "block";
+        }
+        if (imgWrapper) {
+          imgWrapper.style.width = "100%";
+          imgWrapper.style.maxWidth = "none";
+        }
+        if (customWidth !== "100%")
+          iframe.style.width = customWidth;
       } else {
         body.createEl("div", {
           cls: "fast-external-embed-error",
