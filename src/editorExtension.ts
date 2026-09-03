@@ -20,7 +20,12 @@ class FastExternalEmbedWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const container = document.createElement("div");
     container.classList.add("fast-external-embed-live-widget");
-    this.renderer.render(this.parsed, container);
+    try {
+      this.renderer.render(this.parsed, container);
+    } catch (e) {
+      console.error("Fast External Embed toDOM error:", e);
+      container.textContent = "无法渲染外部资源";
+    }
     return container;
   }
 
@@ -60,6 +65,13 @@ export function buildEditorExtension(renderer: EmbedRenderer) {
         const state = view.state;
         const selection = state.selection.main;
 
+        interface PendingDecoration {
+          from: number;
+          to: number;
+          widget: Decoration;
+        }
+        const pending: PendingDecoration[] = [];
+
         for (const { from, to } of view.visibleRanges) {
           const text = state.sliceDoc(from, to);
 
@@ -80,9 +92,8 @@ export function buildEditorExtension(renderer: EmbedRenderer) {
             if (parsed) {
               const widget = Decoration.replace({
                 widget: new FastExternalEmbedWidget(parsed, renderer),
-                block: true,
               });
-              builder.add(matchStart, matchEnd, widget);
+              pending.push({ from: matchStart, to: matchEnd, widget });
             }
           }
 
@@ -103,10 +114,19 @@ export function buildEditorExtension(renderer: EmbedRenderer) {
             if (parsed) {
               const widget = Decoration.replace({
                 widget: new FastExternalEmbedWidget(parsed, renderer),
-                block: true,
               });
-              builder.add(matchStart, matchEnd, widget);
+              pending.push({ from: matchStart, to: matchEnd, widget });
             }
+          }
+        }
+
+        // 必须按坐标严格从小到大排序，并确保区间互不重叠，否则 RangeSetBuilder 会抛出异常导致 CodeMirror 崩溃
+        pending.sort((a, b) => a.from - b.from);
+        let lastTo = -1;
+        for (const item of pending) {
+          if (item.from >= lastTo) {
+            builder.add(item.from, item.to, item.widget);
+            lastTo = item.to;
           }
         }
 

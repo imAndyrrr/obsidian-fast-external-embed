@@ -1,6 +1,8 @@
 /* Fast External Embed 样式 */
 
 .fast-external-embed-container {
+  display: block;
+  width: 100%;
   position: relative;
   margin: 1em 0;
   border: 1px solid var(--background-modifier-border);

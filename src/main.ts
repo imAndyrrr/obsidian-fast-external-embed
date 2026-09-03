@@ -25,8 +25,6 @@ const DEFAULT_SETTINGS: FastExternalEmbedSettings = {
 export default class FastExternalEmbedPlugin extends Plugin {
   settings: FastExternalEmbedSettings;
   renderer: EmbedRenderer;
-  private observer: MutationObserver | null = null;
-  private scanTimer: any = null;
 
   async onload() {
     await this.loadSettings();
@@ -43,9 +41,6 @@ export default class FastExternalEmbedPlugin extends Plugin {
       this.registerEditorExtension(buildEditorExtension(this.renderer));
     }
 
-    // 3. 启动全局 MutationObserver，实时捕获 Live Preview 中的未解析嵌入与“找不到文件”占位符
-    this.startGlobalObserver();
-
     // 3. 注册设置面板
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
 
@@ -53,13 +48,6 @@ export default class FastExternalEmbedPlugin extends Plugin {
   }
 
   onunload() {
-    if (this.observer) {
-      this.observer.disconnect();
-      this.observer = null;
-    }
-    if (this.scanTimer) {
-      clearTimeout(this.scanTimer);
-    }
     if (this.renderer) {
       this.renderer.cleanup();
     }
@@ -74,44 +62,10 @@ export default class FastExternalEmbedPlugin extends Plugin {
   }
 
   /**
-   * 启动全局 DOM 监听，接管 Live Preview 中生成的未解析文件占位符
-   */
-  private startGlobalObserver() {
-    this.observer = new MutationObserver((mutations) => {
-      let shouldScan = false;
-      for (const mutation of mutations) {
-        if (mutation.addedNodes.length > 0) {
-          shouldScan = true;
-          break;
-        }
-      }
-      if (shouldScan) {
-        this.debouncedScan();
-      }
-    });
-
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
-
-    // 首次加载时立刻执行一次全文档扫描
-    setTimeout(() => {
-      this.scanAndReplaceEmbeds(document.body);
-    }, 500);
-  }
-
-  private debouncedScan() {
-    if (this.scanTimer) clearTimeout(this.scanTimer);
-    this.scanTimer = setTimeout(() => {
-      this.scanAndReplaceEmbeds(document.body);
-    }, 100);
-  }
-
-  /**
-   * 扫描并替换 DOM 元素中的外部嵌入（同时适用于阅读视图和实时预览）
+   * 扫描并替换 DOM 元素中的外部嵌入（阅读视图）
    */
   private scanAndReplaceEmbeds(root: HTMLElement) {
+    try {
     // 1. 处理 ![[...]] 语法生成的 internal-embed 或 file-embed（包括“找不到文件”报错元素）
     const embedEls = root.querySelectorAll<HTMLElement>(
       ".internal-embed:not([data-fast-embed-processed]), .file-embed:not([data-fast-embed-processed])"
@@ -159,6 +113,9 @@ export default class FastExternalEmbedPlugin extends Plugin {
         }
       }
     });
+    } catch (err) {
+      console.error("Fast External Embed scan error:", err);
+    }
   }
 }
 

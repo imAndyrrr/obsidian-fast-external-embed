@@ -76,7 +76,12 @@ export class EmbedRenderer {
       if (/^[a-zA-Z]:/.test(cleanTarget)) {
         cleanTarget = cleanTarget.replace(/^\//, "");
       }
+    }
+
+    try {
       cleanTarget = decodeURIComponent(cleanTarget);
+    } catch (_) {
+      // ignore decode error
     }
 
     if (!isHttp) {

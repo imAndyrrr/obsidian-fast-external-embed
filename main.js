@@ -92,7 +92,10 @@ var EmbedRenderer = class {
       if (/^[a-zA-Z]:/.test(cleanTarget)) {
         cleanTarget = cleanTarget.replace(/^\//, "");
       }
+    }
+    try {
       cleanTarget = decodeURIComponent(cleanTarget);
+    } catch (_) {
     }
     if (!isHttp) {
       cleanTarget = path.normalize(cleanTarget);
@@ -364,7 +367,12 @@ var FastExternalEmbedWidget = class extends import_view.WidgetType {
   toDOM(view) {
     const container = document.createElement("div");
     container.classList.add("fast-external-embed-live-widget");
-    this.renderer.render(this.parsed, container);
+    try {
+      this.renderer.render(this.parsed, container);
+    } catch (e) {
+      console.error("Fast External Embed toDOM error:", e);
+      container.textContent = "\u65E0\u6CD5\u6E32\u67D3\u5916\u90E8\u8D44\u6E90";
+    }
     return container;
   }
   eq(other) {
@@ -389,6 +397,7 @@ function buildEditorExtension(renderer) {
         const builder = new import_state.RangeSetBuilder();
         const state = view.state;
         const selection = state.selection.main;
+        const pending = [];
         for (const { from, to } of view.visibleRanges) {
           const text = state.sliceDoc(from, to);
           const wikiRegex = /!\[\[(.*?)\]\]/g;
@@ -403,10 +412,9 @@ function buildEditorExtension(renderer) {
             const parsed = renderer.parseTarget(target);
             if (parsed) {
               const widget = import_view.Decoration.replace({
-                widget: new FastExternalEmbedWidget(parsed, renderer),
-                block: true
+                widget: new FastExternalEmbedWidget(parsed, renderer)
               });
-              builder.add(matchStart, matchEnd, widget);
+              pending.push({ from: matchStart, to: matchEnd, widget });
             }
           }
           const mdRegex = /!\[(.*?)\]\((.*?)\)/g;
@@ -421,11 +429,18 @@ function buildEditorExtension(renderer) {
             const parsed = renderer.parseTarget(target, altText);
             if (parsed) {
               const widget = import_view.Decoration.replace({
-                widget: new FastExternalEmbedWidget(parsed, renderer),
-                block: true
+                widget: new FastExternalEmbedWidget(parsed, renderer)
               });
-              builder.add(matchStart, matchEnd, widget);
+              pending.push({ from: matchStart, to: matchEnd, widget });
             }
+          }
+        }
+        pending.sort((a, b) => a.from - b.from);
+        let lastTo = -1;
+        for (const item of pending) {
+          if (item.from >= lastTo) {
+            builder.add(item.from, item.to, item.widget);
+            lastTo = item.to;
           }
         }
         return builder.finish();
@@ -445,11 +460,6 @@ var DEFAULT_SETTINGS = {
   enableLivePreview: true
 };
 var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
-  constructor() {
-    super(...arguments);
-    this.observer = null;
-    this.scanTimer = null;
-  }
   async onload() {
     await this.loadSettings();
     this.renderer = new EmbedRenderer((key) => this.settings[key]);
@@ -459,18 +469,10 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     if (this.settings.enableLivePreview) {
       this.registerEditorExtension(buildEditorExtension(this.renderer));
     }
-    this.startGlobalObserver();
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
     console.log("Fast External Embed \u63D2\u4EF6\u5DF2\u5C31\u7EEA");
   }
   onunload() {
-    if (this.observer) {
-      this.observer.disconnect();
-      this.observer = null;
-    }
-    if (this.scanTimer) {
-      clearTimeout(this.scanTimer);
-    }
     if (this.renderer) {
       this.renderer.cleanup();
     }
@@ -482,80 +484,53 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     await this.saveData(this.settings);
   }
   /**
-   * 启动全局 DOM 监听，接管 Live Preview 中生成的未解析文件占位符
-   */
-  startGlobalObserver() {
-    this.observer = new MutationObserver((mutations) => {
-      let shouldScan = false;
-      for (const mutation of mutations) {
-        if (mutation.addedNodes.length > 0) {
-          shouldScan = true;
-          break;
-        }
-      }
-      if (shouldScan) {
-        this.debouncedScan();
-      }
-    });
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-    setTimeout(() => {
-      this.scanAndReplaceEmbeds(document.body);
-    }, 500);
-  }
-  debouncedScan() {
-    if (this.scanTimer)
-      clearTimeout(this.scanTimer);
-    this.scanTimer = setTimeout(() => {
-      this.scanAndReplaceEmbeds(document.body);
-    }, 100);
-  }
-  /**
-   * 扫描并替换 DOM 元素中的外部嵌入（同时适用于阅读视图和实时预览）
+   * 扫描并替换 DOM 元素中的外部嵌入（阅读视图）
    */
   scanAndReplaceEmbeds(root) {
-    const embedEls = root.querySelectorAll(
-      ".internal-embed:not([data-fast-embed-processed]), .file-embed:not([data-fast-embed-processed])"
-    );
-    embedEls.forEach((embedEl) => {
-      let src = embedEl.getAttribute("src");
-      const alt = embedEl.getAttribute("alt") || void 0;
-      if (!src) {
-        const text = embedEl.innerText || embedEl.textContent || "";
-        const parsedFromText = this.renderer.parseTarget(text, alt);
-        if (parsedFromText) {
-          embedEl.setAttribute("data-fast-embed-processed", "true");
-          this.renderer.render(parsedFromText, embedEl);
+    try {
+      const embedEls = root.querySelectorAll(
+        ".internal-embed:not([data-fast-embed-processed]), .file-embed:not([data-fast-embed-processed])"
+      );
+      embedEls.forEach((embedEl) => {
+        let src = embedEl.getAttribute("src");
+        const alt = embedEl.getAttribute("alt") || void 0;
+        if (!src) {
+          const text = embedEl.innerText || embedEl.textContent || "";
+          const parsedFromText = this.renderer.parseTarget(text, alt);
+          if (parsedFromText) {
+            embedEl.setAttribute("data-fast-embed-processed", "true");
+            this.renderer.render(parsedFromText, embedEl);
+            return;
+          }
+        }
+        if (!src)
           return;
+        const parsed = this.renderer.parseTarget(src, alt);
+        if (parsed) {
+          embedEl.setAttribute("data-fast-embed-processed", "true");
+          this.renderer.render(parsed, embedEl);
         }
-      }
-      if (!src)
-        return;
-      const parsed = this.renderer.parseTarget(src, alt);
-      if (parsed) {
-        embedEl.setAttribute("data-fast-embed-processed", "true");
-        this.renderer.render(parsed, embedEl);
-      }
-    });
-    const imgs = root.querySelectorAll("img:not([data-fast-embed-processed])");
-    imgs.forEach((img) => {
-      const src = img.getAttribute("src");
-      const alt = img.getAttribute("alt") || void 0;
-      if (!src)
-        return;
-      const parsed = this.renderer.parseTarget(src, alt);
-      if (parsed) {
-        const nonImgExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
-        if (parsed.isHttp || nonImgExts.includes(parsed.extension)) {
-          img.setAttribute("data-fast-embed-processed", "true");
-          const container = document.createElement("div");
-          img.replaceWith(container);
-          this.renderer.render(parsed, container);
+      });
+      const imgs = root.querySelectorAll("img:not([data-fast-embed-processed])");
+      imgs.forEach((img) => {
+        const src = img.getAttribute("src");
+        const alt = img.getAttribute("alt") || void 0;
+        if (!src)
+          return;
+        const parsed = this.renderer.parseTarget(src, alt);
+        if (parsed) {
+          const nonImgExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
+          if (parsed.isHttp || nonImgExts.includes(parsed.extension)) {
+            img.setAttribute("data-fast-embed-processed", "true");
+            const container = document.createElement("div");
+            img.replaceWith(container);
+            this.renderer.render(parsed, container);
+          }
         }
-      }
-    });
+      });
+    } catch (err) {
+      console.error("Fast External Embed scan error:", err);
+    }
   }
 };
 var FastExternalEmbedSettingTab = class extends import_obsidian2.PluginSettingTab {
