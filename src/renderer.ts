@@ -49,24 +49,38 @@ export class EmbedRenderer {
     }
 
     // 分离 hash 与参数（例如 #page=3&height=500px）
-    // 注意：文件夹名称中可能含有 #（如 C:/#Self/...），所以 hash 只能位于文件名末尾！
+    // 注意：文件夹名称中可能含有 #（如 C:/#Self/...），所以 hash 只能位于文件名末尾，且通常形如 #page=... 或在已有文件扩展名之后！
     let cleanTarget = str;
     let hash = "";
     const params: Record<string, string> = {};
 
-    // 寻找最后一个路径分隔符之后出现的 '#'
-    const lastSlash = Math.max(str.lastIndexOf("/"), str.lastIndexOf("\\"));
-    const hashIndex = str.indexOf("#", lastSlash === -1 ? 0 : lastSlash);
-
-    if (hashIndex !== -1) {
-      cleanTarget = str.substring(0, hashIndex);
-      hash = str.substring(hashIndex + 1);
-
-      // 解析参数
+    // 优先匹配标准参数 hash：如 .pdf#page=2 或末尾的 #page=... / #height=...
+    const hashParamMatch = str.match(/#([a-zA-Z0-9_\-]+=[^#]*)$/);
+    if (hashParamMatch) {
+      const idx = hashParamMatch.index!;
+      cleanTarget = str.substring(0, idx);
+      hash = str.substring(idx + 1);
       const parts = hash.split("&");
       for (const part of parts) {
         const [k, v] = part.split("=");
         if (k) params[k.trim().toLowerCase()] = v ? decodeURIComponent(v.trim()) : "";
+      }
+    } else {
+      // 寻找最后一个路径分隔符之后出现的 '#'
+      const lastSlash = Math.max(str.lastIndexOf("/"), str.lastIndexOf("\\"));
+      const hashIndex = str.indexOf("#", lastSlash === -1 ? 0 : lastSlash);
+      // 只有当 # 后面紧跟的是常见参数名（如 page, height, width）或者出现在已有扩展名之后时才作为 hash
+      if (hashIndex !== -1 && (hashIndex > lastSlash + 1)) {
+        const potentialHash = str.substring(hashIndex + 1);
+        if (/^(page|height|width)=/i.test(potentialHash) || /\.[a-zA-Z0-9]{2,5}#/i.test(str)) {
+          cleanTarget = str.substring(0, hashIndex);
+          hash = potentialHash;
+          const parts = hash.split("&");
+          for (const part of parts) {
+            const [k, v] = part.split("=");
+            if (k) params[k.trim().toLowerCase()] = v ? decodeURIComponent(v.trim()) : "";
+          }
+        }
       }
     }
 
@@ -137,8 +151,10 @@ export class EmbedRenderer {
       const iconEl = titleEl.createEl("span");
       this.setIconByExtension(iconEl, parsed.extension, parsed.isHttp);
 
-      const titleText = parsed.alt || (parsed.isHttp ? parsed.cleanTarget : path.basename(parsed.cleanTarget));
-      titleEl.createEl("span", { text: titleText });
+      const displayName = !parsed.isHttp
+        ? path.basename(parsed.cleanTarget)
+        : (parsed.alt || parsed.cleanTarget);
+      titleEl.createEl("span", { text: displayName });
 
       const actions = header.createEl("div", { cls: "fast-external-embed-actions" });
 
@@ -192,15 +208,16 @@ export class EmbedRenderer {
 
       if (parsed.extension === ".pdf") {
         // 利用 Chromium 原生 C++ PDF 引擎渲染
-        const embed = body.createEl("embed", {
+        const iframe = body.createEl("iframe", {
           cls: "fast-external-embed-pdf",
           attr: {
-            type: "application/pdf",
             src: fullUrl,
+            frameborder: "0",
           },
         });
-        embed.style.setProperty("--fast-embed-pdf-height", customHeight);
-        if (customWidth !== "100%") embed.style.width = customWidth;
+        iframe.style.setProperty("--fast-embed-pdf-height", customHeight);
+        iframe.style.height = customHeight;
+        if (customWidth !== "100%") iframe.style.width = customWidth;
       } else if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"].includes(parsed.extension)) {
         const img = body.createEl("img", {
           cls: "fast-external-embed-img",
@@ -317,7 +334,7 @@ export class EmbedRenderer {
     this.currentCacheSize = 0;
   }
 
-  private openInSystemDefault(filePath: string) {
+  public openInSystemDefault(filePath: string) {
     try {
       const electron = (window as any).require("electron");
       electron.shell.openPath(filePath).then((err: string) => {
@@ -330,7 +347,7 @@ export class EmbedRenderer {
     }
   }
 
-  private showInExplorer(filePath: string) {
+  public showInExplorer(filePath: string) {
     try {
       const electron = (window as any).require("electron");
       electron.shell.showItemInFolder(filePath);

@@ -25,6 +25,8 @@ const DEFAULT_SETTINGS: FastExternalEmbedSettings = {
 export default class FastExternalEmbedPlugin extends Plugin {
   settings: FastExternalEmbedSettings;
   renderer: EmbedRenderer;
+  private observer: MutationObserver | null = null;
+  private scanTimer: any = null;
 
   async onload() {
     await this.loadSettings();
@@ -36,18 +38,43 @@ export default class FastExternalEmbedPlugin extends Plugin {
       this.scanAndReplaceEmbeds(element);
     });
 
-    // 2. 注册 Live Preview（实时预览）CodeMirror 6 扩展
-    if (this.settings.enableLivePreview) {
-      this.registerEditorExtension(buildEditorExtension(this.renderer));
-    }
+    // 2. 启动轻量高效 DOM 监听，接管 Live Preview / 动态渲染中的未解析占位符
+    this.startDOMObserver();
 
-    // 3. 注册设置面板
+    // 3. 全局拦截外部链接点击（防止点击 [[C:/...]] 或 file:/// 时在仓库内创建空白笔记）
+    this.registerDomEvent(document, "click", (evt: MouseEvent) => {
+      const target = evt.target as HTMLElement;
+      if (!target) return;
+      const linkEl = target.closest<HTMLElement>("a, .cm-link, [data-href]");
+      if (!linkEl) return;
+
+      const rawHref = linkEl.getAttribute("href") || linkEl.getAttribute("data-href");
+      if (!rawHref) return;
+
+      if (/^file:\/\/\/?/i.test(rawHref) || /^[a-zA-Z]:[\\\/]/.test(rawHref)) {
+        const parsed = this.renderer.parseTarget(rawHref);
+        if (parsed && !parsed.isHttp) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          this.renderer.openInSystemDefault(parsed.cleanTarget);
+        }
+      }
+    }, true);
+
+    // 4. 注册设置面板
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
 
     console.log("Fast External Embed 插件已就绪");
   }
 
   onunload() {
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+    if (this.scanTimer) {
+      clearTimeout(this.scanTimer);
+    }
     if (this.renderer) {
       this.renderer.cleanup();
     }
@@ -62,7 +89,52 @@ export default class FastExternalEmbedPlugin extends Plugin {
   }
 
   /**
-   * 扫描并替换 DOM 元素中的外部嵌入（阅读视图）
+   * 监听 DOM 树变化，检测并替换未加载的外部嵌入元素
+   */
+  private startDOMObserver() {
+    this.observer = new MutationObserver((mutations) => {
+      let shouldScan = false;
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length > 0) {
+          for (let i = 0; i < mutation.addedNodes.length; i++) {
+            const node = mutation.addedNodes[i];
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              const el = node as HTMLElement;
+              if (
+                el.classList?.contains("internal-embed") ||
+                el.classList?.contains("file-embed") ||
+                el.querySelector?.(".internal-embed, .file-embed, img")
+              ) {
+                shouldScan = true;
+                break;
+              }
+            }
+          }
+        }
+        if (shouldScan) break;
+      }
+
+      if (shouldScan) {
+        if (this.scanTimer) clearTimeout(this.scanTimer);
+        this.scanTimer = setTimeout(() => {
+          this.scanAndReplaceEmbeds(document.body);
+        }, 50);
+      }
+    });
+
+    this.observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    // 立即对当前界面执行一次扫描
+    setTimeout(() => {
+      this.scanAndReplaceEmbeds(document.body);
+    }, 200);
+  }
+
+  /**
+   * 扫描并替换 DOM 元素中的外部嵌入（同时支持阅读视图和实时预览）
    */
   private scanAndReplaceEmbeds(root: HTMLElement) {
     try {
@@ -81,6 +153,8 @@ export default class FastExternalEmbedPlugin extends Plugin {
         const parsedFromText = this.renderer.parseTarget(text, alt);
         if (parsedFromText) {
           embedEl.setAttribute("data-fast-embed-processed", "true");
+          // 移除 mod-empty-attachment 样式避免原生的空附件红框干扰
+          embedEl.classList.remove("mod-empty-attachment");
           this.renderer.render(parsedFromText, embedEl);
           return;
         }
@@ -91,6 +165,7 @@ export default class FastExternalEmbedPlugin extends Plugin {
       const parsed = this.renderer.parseTarget(src, alt);
       if (parsed) {
         embedEl.setAttribute("data-fast-embed-processed", "true");
+        embedEl.classList.remove("mod-empty-attachment");
         this.renderer.render(parsed, embedEl);
       }
     });

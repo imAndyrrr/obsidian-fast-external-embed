@@ -75,16 +75,32 @@ var EmbedRenderer = class {
     let cleanTarget = str;
     let hash = "";
     const params = {};
-    const lastSlash = Math.max(str.lastIndexOf("/"), str.lastIndexOf("\\"));
-    const hashIndex = str.indexOf("#", lastSlash === -1 ? 0 : lastSlash);
-    if (hashIndex !== -1) {
-      cleanTarget = str.substring(0, hashIndex);
-      hash = str.substring(hashIndex + 1);
+    const hashParamMatch = str.match(/#([a-zA-Z0-9_\-]+=[^#]*)$/);
+    if (hashParamMatch) {
+      const idx = hashParamMatch.index;
+      cleanTarget = str.substring(0, idx);
+      hash = str.substring(idx + 1);
       const parts = hash.split("&");
       for (const part of parts) {
         const [k, v] = part.split("=");
         if (k)
           params[k.trim().toLowerCase()] = v ? decodeURIComponent(v.trim()) : "";
+      }
+    } else {
+      const lastSlash = Math.max(str.lastIndexOf("/"), str.lastIndexOf("\\"));
+      const hashIndex = str.indexOf("#", lastSlash === -1 ? 0 : lastSlash);
+      if (hashIndex !== -1 && hashIndex > lastSlash + 1) {
+        const potentialHash = str.substring(hashIndex + 1);
+        if (/^(page|height|width)=/i.test(potentialHash) || /\.[a-zA-Z0-9]{2,5}#/i.test(str)) {
+          cleanTarget = str.substring(0, hashIndex);
+          hash = potentialHash;
+          const parts = hash.split("&");
+          for (const part of parts) {
+            const [k, v] = part.split("=");
+            if (k)
+              params[k.trim().toLowerCase()] = v ? decodeURIComponent(v.trim()) : "";
+          }
+        }
       }
     }
     if (isFileProtocol) {
@@ -141,8 +157,8 @@ var EmbedRenderer = class {
       const titleEl = header.createEl("div", { cls: "fast-external-embed-title" });
       const iconEl = titleEl.createEl("span");
       this.setIconByExtension(iconEl, parsed.extension, parsed.isHttp);
-      const titleText = parsed.alt || (parsed.isHttp ? parsed.cleanTarget : path.basename(parsed.cleanTarget));
-      titleEl.createEl("span", { text: titleText });
+      const displayName = !parsed.isHttp ? path.basename(parsed.cleanTarget) : parsed.alt || parsed.cleanTarget;
+      titleEl.createEl("span", { text: displayName });
       const actions = header.createEl("div", { cls: "fast-external-embed-actions" });
       if (!parsed.isHttp) {
         const openBtn = actions.createEl("button", {
@@ -187,16 +203,17 @@ var EmbedRenderer = class {
       const playableUrl = await this.resolvePlayableUrl(parsed);
       const fullUrl = parsed.hash ? `${playableUrl}#${parsed.hash}` : playableUrl;
       if (parsed.extension === ".pdf") {
-        const embed = body.createEl("embed", {
+        const iframe = body.createEl("iframe", {
           cls: "fast-external-embed-pdf",
           attr: {
-            type: "application/pdf",
-            src: fullUrl
+            src: fullUrl,
+            frameborder: "0"
           }
         });
-        embed.style.setProperty("--fast-embed-pdf-height", customHeight);
+        iframe.style.setProperty("--fast-embed-pdf-height", customHeight);
+        iframe.style.height = customHeight;
         if (customWidth !== "100%")
-          embed.style.width = customWidth;
+          iframe.style.width = customWidth;
       } else if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"].includes(parsed.extension)) {
         const img = body.createEl("img", {
           cls: "fast-external-embed-img",
@@ -355,103 +372,6 @@ var EmbedRenderer = class {
   }
 };
 
-// src/editorExtension.ts
-var import_view = require("@codemirror/view");
-var import_state = require("@codemirror/state");
-var FastExternalEmbedWidget = class extends import_view.WidgetType {
-  constructor(parsed, renderer) {
-    super();
-    this.parsed = parsed;
-    this.renderer = renderer;
-  }
-  toDOM(view) {
-    const container = document.createElement("div");
-    container.classList.add("fast-external-embed-live-widget");
-    try {
-      this.renderer.render(this.parsed, container);
-    } catch (e) {
-      console.error("Fast External Embed toDOM error:", e);
-      container.textContent = "\u65E0\u6CD5\u6E32\u67D3\u5916\u90E8\u8D44\u6E90";
-    }
-    return container;
-  }
-  eq(other) {
-    return this.parsed.rawTarget === other.parsed.rawTarget && this.parsed.alt === other.parsed.alt;
-  }
-  ignoreEvent() {
-    return false;
-  }
-};
-function buildEditorExtension(renderer) {
-  return import_view.ViewPlugin.fromClass(
-    class {
-      constructor(view) {
-        this.decorations = this.buildDecorations(view);
-      }
-      update(update) {
-        if (update.docChanged || update.viewportChanged || update.selectionSet) {
-          this.decorations = this.buildDecorations(update.view);
-        }
-      }
-      buildDecorations(view) {
-        const builder = new import_state.RangeSetBuilder();
-        const state = view.state;
-        const selection = state.selection.main;
-        const pending = [];
-        for (const { from, to } of view.visibleRanges) {
-          const text = state.sliceDoc(from, to);
-          const wikiRegex = /!\[\[(.*?)\]\]/g;
-          let match;
-          while ((match = wikiRegex.exec(text)) !== null) {
-            const matchStart = from + match.index;
-            const matchEnd = matchStart + match[0].length;
-            if (selection.from <= matchEnd && selection.to >= matchStart) {
-              continue;
-            }
-            const target = match[1];
-            const parsed = renderer.parseTarget(target);
-            if (parsed) {
-              const widget = import_view.Decoration.replace({
-                widget: new FastExternalEmbedWidget(parsed, renderer)
-              });
-              pending.push({ from: matchStart, to: matchEnd, widget });
-            }
-          }
-          const mdRegex = /!\[(.*?)\]\((.*?)\)/g;
-          while ((match = mdRegex.exec(text)) !== null) {
-            const matchStart = from + match.index;
-            const matchEnd = matchStart + match[0].length;
-            if (selection.from <= matchEnd && selection.to >= matchStart) {
-              continue;
-            }
-            const altText = match[1];
-            const target = match[2];
-            const parsed = renderer.parseTarget(target, altText);
-            if (parsed) {
-              const widget = import_view.Decoration.replace({
-                widget: new FastExternalEmbedWidget(parsed, renderer)
-              });
-              pending.push({ from: matchStart, to: matchEnd, widget });
-            }
-          }
-        }
-        pending.sort((a, b) => a.from - b.from);
-        let lastTo = -1;
-        for (const item of pending) {
-          if (item.from >= lastTo) {
-            builder.add(item.from, item.to, item.widget);
-            lastTo = item.to;
-          }
-        }
-        return builder.finish();
-      }
-    },
-    {
-      decorations: (v) => v.decorations
-    }
-  );
-}
-
 // src/main.ts
 var DEFAULT_SETTINGS = {
   showHeader: true,
@@ -460,19 +380,48 @@ var DEFAULT_SETTINGS = {
   enableLivePreview: true
 };
 var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
+  constructor() {
+    super(...arguments);
+    this.observer = null;
+    this.scanTimer = null;
+  }
   async onload() {
     await this.loadSettings();
     this.renderer = new EmbedRenderer((key) => this.settings[key]);
     this.registerMarkdownPostProcessor((element, context) => {
       this.scanAndReplaceEmbeds(element);
     });
-    if (this.settings.enableLivePreview) {
-      this.registerEditorExtension(buildEditorExtension(this.renderer));
-    }
+    this.startDOMObserver();
+    this.registerDomEvent(document, "click", (evt) => {
+      const target = evt.target;
+      if (!target)
+        return;
+      const linkEl = target.closest("a, .cm-link, [data-href]");
+      if (!linkEl)
+        return;
+      const rawHref = linkEl.getAttribute("href") || linkEl.getAttribute("data-href");
+      if (!rawHref)
+        return;
+      if (/^file:\/\/\/?/i.test(rawHref) || /^[a-zA-Z]:[\\\/]/.test(rawHref)) {
+        const parsed = this.renderer.parseTarget(rawHref);
+        if (parsed && !parsed.isHttp) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          this.renderer.openInSystemDefault(parsed.cleanTarget);
+        }
+      }
+    }, true);
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
     console.log("Fast External Embed \u63D2\u4EF6\u5DF2\u5C31\u7EEA");
   }
   onunload() {
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+    if (this.scanTimer) {
+      clearTimeout(this.scanTimer);
+    }
     if (this.renderer) {
       this.renderer.cleanup();
     }
@@ -484,7 +433,46 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     await this.saveData(this.settings);
   }
   /**
-   * 扫描并替换 DOM 元素中的外部嵌入（阅读视图）
+   * 监听 DOM 树变化，检测并替换未加载的外部嵌入元素
+   */
+  startDOMObserver() {
+    this.observer = new MutationObserver((mutations) => {
+      var _a, _b, _c;
+      let shouldScan = false;
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length > 0) {
+          for (let i = 0; i < mutation.addedNodes.length; i++) {
+            const node = mutation.addedNodes[i];
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              const el = node;
+              if (((_a = el.classList) == null ? void 0 : _a.contains("internal-embed")) || ((_b = el.classList) == null ? void 0 : _b.contains("file-embed")) || ((_c = el.querySelector) == null ? void 0 : _c.call(el, ".internal-embed, .file-embed, img"))) {
+                shouldScan = true;
+                break;
+              }
+            }
+          }
+        }
+        if (shouldScan)
+          break;
+      }
+      if (shouldScan) {
+        if (this.scanTimer)
+          clearTimeout(this.scanTimer);
+        this.scanTimer = setTimeout(() => {
+          this.scanAndReplaceEmbeds(document.body);
+        }, 50);
+      }
+    });
+    this.observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+    setTimeout(() => {
+      this.scanAndReplaceEmbeds(document.body);
+    }, 200);
+  }
+  /**
+   * 扫描并替换 DOM 元素中的外部嵌入（同时支持阅读视图和实时预览）
    */
   scanAndReplaceEmbeds(root) {
     try {
@@ -499,6 +487,7 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
           const parsedFromText = this.renderer.parseTarget(text, alt);
           if (parsedFromText) {
             embedEl.setAttribute("data-fast-embed-processed", "true");
+            embedEl.classList.remove("mod-empty-attachment");
             this.renderer.render(parsedFromText, embedEl);
             return;
           }
@@ -508,6 +497,7 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
         const parsed = this.renderer.parseTarget(src, alt);
         if (parsed) {
           embedEl.setAttribute("data-fast-embed-processed", "true");
+          embedEl.classList.remove("mod-empty-attachment");
           this.renderer.render(parsed, embedEl);
         }
       });

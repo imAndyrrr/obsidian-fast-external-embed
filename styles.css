@@ -1,13 +1,15 @@
 /* Fast External Embed 样式 */
 
-.fast-external-embed-container {
-  display: block;
-  width: 100%;
+.fast-external-embed-container,
+.file-embed.fast-external-embed-container {
+  display: block !important;
+  width: 100% !important;
   position: relative;
   margin: 1em 0;
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
   overflow: hidden;
+  color: var(--text-normal) !important;
   background-color: var(--background-secondary);
   transition: border-color 0.2s ease;
 }
