@@ -45,15 +45,6 @@
   text-decoration-color: var(--link-decoration-color);
 }
 
-.fast-external-file-link::before {
-  content: "↗";
-  display: inline-block;
-  margin-right: 0.2em;
-  color: var(--text-muted);
-  font-size: 0.8em;
-  text-decoration: none;
-}
-
 .fast-external-file-link:hover {
   color: var(--link-color-hover) !important;
   text-decoration: var(--link-decoration-hover);
