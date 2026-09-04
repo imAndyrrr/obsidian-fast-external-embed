@@ -240,11 +240,42 @@ export default class FastExternalEmbedPlugin extends Plugin {
   private getExternalLinkTarget(linkEl: HTMLElement): string | null {
     const source =
       linkEl.getAttribute("data-href") ||
-      linkEl.getAttribute("href") ||
-      linkEl.textContent;
+      linkEl.getAttribute("href");
 
-    if (!source) return null;
+    if (source) {
+      return this.removeWikiLinkAlias(source);
+    }
 
+    // Live Preview 的别名链接只保留显示文字，例如 [[C:/file.pdf|打开 PDF]]
+    // 会显示为 “打开 PDF”。此时从当前编辑行还原完整的 [[...]] 语法。
+    const lineText = linkEl.closest(".cm-line")?.textContent || "";
+    const linkText = linkEl.textContent?.trim() || "";
+    const wikiTargets = [...lineText.matchAll(/\[\[([\s\S]*?)\]\]/g)]
+      .map((match) => match[1].trim())
+      .filter(Boolean);
+
+    for (const wikiTarget of wikiTargets) {
+      const aliasIndex = wikiTarget.lastIndexOf("|");
+      const target = aliasIndex === -1
+        ? wikiTarget
+        : wikiTarget.slice(0, aliasIndex).trim();
+      const alias = aliasIndex === -1
+        ? ""
+        : wikiTarget.slice(aliasIndex + 1).trim();
+
+      if (
+        wikiTargets.length === 1 ||
+        target === linkText ||
+        alias === linkText
+      ) {
+        return target || null;
+      }
+    }
+
+    return this.removeWikiLinkAlias(linkText);
+  }
+
+  private removeWikiLinkAlias(source: string): string | null {
     let target = source.trim();
     const wikiMatch = target.match(/^\[\[([\s\S]+)\]\]$/);
     if (wikiMatch) target = wikiMatch[1].trim();

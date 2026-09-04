@@ -575,9 +575,25 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
    * 支持 [[C:/file.pdf|显示名称]] 这样的别名语法。
    */
   getExternalLinkTarget(linkEl) {
-    const source = linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || linkEl.textContent;
-    if (!source)
-      return null;
+    var _a, _b;
+    const source = linkEl.getAttribute("data-href") || linkEl.getAttribute("href");
+    if (source) {
+      return this.removeWikiLinkAlias(source);
+    }
+    const lineText = ((_a = linkEl.closest(".cm-line")) == null ? void 0 : _a.textContent) || "";
+    const linkText = ((_b = linkEl.textContent) == null ? void 0 : _b.trim()) || "";
+    const wikiTargets = [...lineText.matchAll(/\[\[([\s\S]*?)\]\]/g)].map((match) => match[1].trim()).filter(Boolean);
+    for (const wikiTarget of wikiTargets) {
+      const aliasIndex = wikiTarget.lastIndexOf("|");
+      const target = aliasIndex === -1 ? wikiTarget : wikiTarget.slice(0, aliasIndex).trim();
+      const alias = aliasIndex === -1 ? "" : wikiTarget.slice(aliasIndex + 1).trim();
+      if (wikiTargets.length === 1 || target === linkText || alias === linkText) {
+        return target || null;
+      }
+    }
+    return this.removeWikiLinkAlias(linkText);
+  }
+  removeWikiLinkAlias(source) {
     let target = source.trim();
     const wikiMatch = target.match(/^\[\[([\s\S]+)\]\]$/);
     if (wikiMatch)
