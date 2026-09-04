@@ -248,31 +248,57 @@ export default class FastExternalEmbedPlugin extends Plugin {
 
     // Live Preview 的别名链接只保留显示文字，例如 [[C:/file.pdf|打开 PDF]]
     // 会显示为 “打开 PDF”。此时从当前编辑行还原完整的 [[...]] 语法。
-    const lineText = linkEl.closest(".cm-line")?.textContent || "";
     const linkText = linkEl.textContent?.trim() || "";
-    const wikiTargets = [...lineText.matchAll(/\[\[([\s\S]*?)\]\]/g)]
-      .map((match) => match[1].trim())
-      .filter(Boolean);
+    const lineTexts = [
+      linkEl.closest(".cm-line")?.textContent || "",
+      this.getSourceLineFromLivePreview(linkEl),
+    ];
 
-    for (const wikiTarget of wikiTargets) {
-      const aliasIndex = wikiTarget.lastIndexOf("|");
-      const target = aliasIndex === -1
-        ? wikiTarget
-        : wikiTarget.slice(0, aliasIndex).trim();
-      const alias = aliasIndex === -1
-        ? ""
-        : wikiTarget.slice(aliasIndex + 1).trim();
+    for (const lineText of lineTexts) {
+      const wikiTargets = [...lineText.matchAll(/\[\[([\s\S]*?)\]\]/g)]
+        .map((match) => match[1].trim())
+        .filter(Boolean);
 
-      if (
-        wikiTargets.length === 1 ||
-        target === linkText ||
-        alias === linkText
-      ) {
-        return target || null;
+      for (const wikiTarget of wikiTargets) {
+        const aliasIndex = wikiTarget.lastIndexOf("|");
+        const target = aliasIndex === -1
+          ? wikiTarget
+          : wikiTarget.slice(0, aliasIndex).trim();
+        const alias = aliasIndex === -1
+          ? ""
+          : wikiTarget.slice(aliasIndex + 1).trim();
+
+        if (
+          wikiTargets.length === 1 ||
+          target === linkText ||
+          alias === linkText
+        ) {
+          return target || null;
+        }
       }
     }
 
     return this.removeWikiLinkAlias(linkText);
+  }
+
+  /**
+   * Live Preview 会将 [[路径|别名]] 的路径部分替换成不可见组件，
+   * 因而 DOM 中只剩别名。通过 CodeMirror 的位置映射回到真实文档行，
+   * 便可取回原始 wiki 链接。
+   */
+  private getSourceLineFromLivePreview(linkEl: HTMLElement): string {
+    if (!linkEl.closest(".cm-editor")) return "";
+
+    const editor = this.app.workspace.activeEditor?.editor as any;
+    const cm = editor?.cm;
+    if (!cm || typeof cm.posAtDOM !== "function") return "";
+
+    try {
+      const position = cm.posAtDOM(linkEl, 0);
+      return cm.state.doc.lineAt(position).text || "";
+    } catch (_) {
+      return "";
+    }
   }
 
   private removeWikiLinkAlias(source: string): string | null {
