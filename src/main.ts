@@ -35,6 +35,7 @@ export default class FastExternalEmbedPlugin extends Plugin {
     // 1. 注册 Reading View（阅读模式）后处理器
     this.registerMarkdownPostProcessor((element: HTMLElement, context: MarkdownPostProcessorContext) => {
       this.scanAndReplaceEmbeds(element);
+      this.scanAndEnhanceExternalLinks(element);
     });
 
     // 2. 启动轻量 DOM 监听，接管 Live Preview / 动态渲染中的未解析占位符
@@ -46,19 +47,19 @@ export default class FastExternalEmbedPlugin extends Plugin {
     this.registerDomEvent(document, "click", (evt: MouseEvent) => {
       const target = evt.target as HTMLElement;
       if (!target) return;
-      const linkEl = target.closest<HTMLElement>("a, .cm-link, [data-href]");
+      const linkEl = target.closest<HTMLElement>(
+        "a, .cm-link, .cm-hmd-internal-link, [data-href]"
+      );
       if (!linkEl) return;
 
-      const rawHref = linkEl.getAttribute("href") || linkEl.getAttribute("data-href");
-      if (!rawHref) return;
+      const rawTarget = this.getExternalLinkTarget(linkEl);
+      if (!rawTarget) return;
 
-      if (/^file:\/\/\/?/i.test(rawHref) || /^[a-zA-Z]:[\\\/]/.test(rawHref)) {
-        const parsed = this.renderer.parseTarget(rawHref);
-        if (parsed && !parsed.isHttp) {
-          evt.preventDefault();
-          evt.stopPropagation();
-          this.renderer.openInSystemDefault(parsed.cleanTarget);
-        }
+      const parsed = this.renderer.parseTarget(rawTarget);
+      if (parsed && !parsed.isHttp) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        this.renderer.openInSystemDefault(parsed.cleanTarget);
       }
     }, true);
 
@@ -103,7 +104,10 @@ export default class FastExternalEmbedPlugin extends Plugin {
               if (
                 el.classList?.contains("internal-embed") ||
                 el.classList?.contains("file-embed") ||
-                el.querySelector?.(".internal-embed, .file-embed, img")
+                el.matches?.("a, .cm-link, .cm-hmd-internal-link, [data-href]") ||
+                el.querySelector?.(
+                  ".internal-embed, .file-embed, img, a, .cm-link, .cm-hmd-internal-link, [data-href]"
+                )
               ) {
                 shouldScan = true;
                 break;
@@ -117,8 +121,9 @@ export default class FastExternalEmbedPlugin extends Plugin {
       if (shouldScan) {
         if (this.scanTimer) clearTimeout(this.scanTimer);
         this.scanTimer = setTimeout(() => {
-          this.scanAndReplaceEmbeds(document.body);
-        }, 50);
+        this.scanAndReplaceEmbeds(document.body);
+        this.scanAndEnhanceExternalLinks(document.body);
+      }, 50);
       }
     });
 
@@ -130,6 +135,7 @@ export default class FastExternalEmbedPlugin extends Plugin {
     // 立即对当前界面执行一次扫描
     setTimeout(() => {
       this.scanAndReplaceEmbeds(document.body);
+      this.scanAndEnhanceExternalLinks(document.body);
     }, 200);
   }
 
@@ -191,6 +197,62 @@ export default class FastExternalEmbedPlugin extends Plugin {
     } catch (err) {
       console.error("Fast External Embed scan error:", err);
     }
+  }
+
+  /**
+   * 将 [[绝对路径]] 标记为外部文件链接。
+   *
+   * Obsidian 会把仓库外路径视作无法解析的内部链接；这里保留原来的文本，
+   * 只补上可识别的样式与提示。实际打开操作由全局点击拦截统一交给系统默认程序。
+   */
+  private scanAndEnhanceExternalLinks(root: HTMLElement) {
+    try {
+      const links = root.querySelectorAll<HTMLElement>(
+        [
+          "a.internal-link:not([data-fast-external-link-processed])",
+          "a[data-href]:not([data-fast-external-link-processed])",
+          ".cm-hmd-internal-link:not([data-fast-external-link-processed])",
+          ".cm-link:not([data-fast-external-link-processed])",
+        ].join(", ")
+      );
+
+      links.forEach((linkEl) => {
+        const rawTarget = this.getExternalLinkTarget(linkEl);
+        if (!rawTarget) return;
+
+        const parsed = this.renderer.parseTarget(rawTarget);
+        if (!parsed || parsed.isHttp) return;
+
+        linkEl.setAttribute("data-fast-external-link-processed", "true");
+        linkEl.addClass("fast-external-file-link");
+        linkEl.setAttribute("title", `用系统默认程序打开：${parsed.cleanTarget}`);
+        linkEl.setAttribute("aria-label", `打开本地文件：${parsed.cleanTarget}`);
+      });
+    } catch (err) {
+      console.error("Fast External Embed link scan error:", err);
+    }
+  }
+
+  /**
+   * 从阅读模式或 Live Preview 的链接元素提取 [[...]] 内的实际目标路径。
+   * 支持 [[C:/file.pdf|显示名称]] 这样的别名语法。
+   */
+  private getExternalLinkTarget(linkEl: HTMLElement): string | null {
+    const source =
+      linkEl.getAttribute("data-href") ||
+      linkEl.getAttribute("href") ||
+      linkEl.textContent;
+
+    if (!source) return null;
+
+    let target = source.trim();
+    const wikiMatch = target.match(/^\[\[([\s\S]+)\]\]$/);
+    if (wikiMatch) target = wikiMatch[1].trim();
+
+    const aliasIndex = target.lastIndexOf("|");
+    if (aliasIndex !== -1) target = target.slice(0, aliasIndex).trim();
+
+    return target || null;
   }
 }
 

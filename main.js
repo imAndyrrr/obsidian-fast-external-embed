@@ -399,6 +399,7 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     this.renderer = new EmbedRenderer((key) => this.settings[key]);
     this.registerMarkdownPostProcessor((element, context) => {
       this.scanAndReplaceEmbeds(element);
+      this.scanAndEnhanceExternalLinks(element);
     });
     if (this.settings.enableLivePreview) {
       this.startDOMObserver();
@@ -407,19 +408,19 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
       const target = evt.target;
       if (!target)
         return;
-      const linkEl = target.closest("a, .cm-link, [data-href]");
+      const linkEl = target.closest(
+        "a, .cm-link, .cm-hmd-internal-link, [data-href]"
+      );
       if (!linkEl)
         return;
-      const rawHref = linkEl.getAttribute("href") || linkEl.getAttribute("data-href");
-      if (!rawHref)
+      const rawTarget = this.getExternalLinkTarget(linkEl);
+      if (!rawTarget)
         return;
-      if (/^file:\/\/\/?/i.test(rawHref) || /^[a-zA-Z]:[\\\/]/.test(rawHref)) {
-        const parsed = this.renderer.parseTarget(rawHref);
-        if (parsed && !parsed.isHttp) {
-          evt.preventDefault();
-          evt.stopPropagation();
-          this.renderer.openInSystemDefault(parsed.cleanTarget);
-        }
+      const parsed = this.renderer.parseTarget(rawTarget);
+      if (parsed && !parsed.isHttp) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        this.renderer.openInSystemDefault(parsed.cleanTarget);
       }
     }, true);
     this.addSettingTab(new FastExternalEmbedSettingTab(this.app, this));
@@ -447,7 +448,7 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
    */
   startDOMObserver() {
     this.observer = new MutationObserver((mutations) => {
-      var _a, _b, _c;
+      var _a, _b, _c, _d;
       let shouldScan = false;
       for (const mutation of mutations) {
         if (mutation.addedNodes.length > 0) {
@@ -455,7 +456,10 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
             const node = mutation.addedNodes[i];
             if (node.nodeType === Node.ELEMENT_NODE) {
               const el = node;
-              if (((_a = el.classList) == null ? void 0 : _a.contains("internal-embed")) || ((_b = el.classList) == null ? void 0 : _b.contains("file-embed")) || ((_c = el.querySelector) == null ? void 0 : _c.call(el, ".internal-embed, .file-embed, img"))) {
+              if (((_a = el.classList) == null ? void 0 : _a.contains("internal-embed")) || ((_b = el.classList) == null ? void 0 : _b.contains("file-embed")) || ((_c = el.matches) == null ? void 0 : _c.call(el, "a, .cm-link, .cm-hmd-internal-link, [data-href]")) || ((_d = el.querySelector) == null ? void 0 : _d.call(
+                el,
+                ".internal-embed, .file-embed, img, a, .cm-link, .cm-hmd-internal-link, [data-href]"
+              ))) {
                 shouldScan = true;
                 break;
               }
@@ -470,6 +474,7 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
           clearTimeout(this.scanTimer);
         this.scanTimer = setTimeout(() => {
           this.scanAndReplaceEmbeds(document.body);
+          this.scanAndEnhanceExternalLinks(document.body);
         }, 50);
       }
     });
@@ -479,6 +484,7 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     });
     setTimeout(() => {
       this.scanAndReplaceEmbeds(document.body);
+      this.scanAndEnhanceExternalLinks(document.body);
     }, 200);
   }
   /**
@@ -531,6 +537,55 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     } catch (err) {
       console.error("Fast External Embed scan error:", err);
     }
+  }
+  /**
+   * 将 [[绝对路径]] 标记为外部文件链接。
+   *
+   * Obsidian 会把仓库外路径视作无法解析的内部链接；这里保留原来的文本，
+   * 只补上可识别的样式与提示。实际打开操作由全局点击拦截统一交给系统默认程序。
+   */
+  scanAndEnhanceExternalLinks(root) {
+    try {
+      const links = root.querySelectorAll(
+        [
+          "a.internal-link:not([data-fast-external-link-processed])",
+          "a[data-href]:not([data-fast-external-link-processed])",
+          ".cm-hmd-internal-link:not([data-fast-external-link-processed])",
+          ".cm-link:not([data-fast-external-link-processed])"
+        ].join(", ")
+      );
+      links.forEach((linkEl) => {
+        const rawTarget = this.getExternalLinkTarget(linkEl);
+        if (!rawTarget)
+          return;
+        const parsed = this.renderer.parseTarget(rawTarget);
+        if (!parsed || parsed.isHttp)
+          return;
+        linkEl.setAttribute("data-fast-external-link-processed", "true");
+        linkEl.addClass("fast-external-file-link");
+        linkEl.setAttribute("title", `\u7528\u7CFB\u7EDF\u9ED8\u8BA4\u7A0B\u5E8F\u6253\u5F00\uFF1A${parsed.cleanTarget}`);
+        linkEl.setAttribute("aria-label", `\u6253\u5F00\u672C\u5730\u6587\u4EF6\uFF1A${parsed.cleanTarget}`);
+      });
+    } catch (err) {
+      console.error("Fast External Embed link scan error:", err);
+    }
+  }
+  /**
+   * 从阅读模式或 Live Preview 的链接元素提取 [[...]] 内的实际目标路径。
+   * 支持 [[C:/file.pdf|显示名称]] 这样的别名语法。
+   */
+  getExternalLinkTarget(linkEl) {
+    const source = linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || linkEl.textContent;
+    if (!source)
+      return null;
+    let target = source.trim();
+    const wikiMatch = target.match(/^\[\[([\s\S]+)\]\]$/);
+    if (wikiMatch)
+      target = wikiMatch[1].trim();
+    const aliasIndex = target.lastIndexOf("|");
+    if (aliasIndex !== -1)
+      target = target.slice(0, aliasIndex).trim();
+    return target || null;
   }
 };
 var FastExternalEmbedSettingTab = class extends import_obsidian2.PluginSettingTab {

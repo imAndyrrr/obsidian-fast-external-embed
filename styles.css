@@ -37,6 +37,28 @@
   width: 100% !important;
 }
 
+/* [[C:/...]] 等仓库外本地文件链接 */
+.fast-external-file-link {
+  color: var(--link-color) !important;
+  cursor: pointer;
+  text-decoration: var(--link-decoration);
+  text-decoration-color: var(--link-decoration-color);
+}
+
+.fast-external-file-link::before {
+  content: "↗";
+  display: inline-block;
+  margin-right: 0.2em;
+  color: var(--text-muted);
+  font-size: 0.8em;
+  text-decoration: none;
+}
+
+.fast-external-file-link:hover {
+  color: var(--link-color-hover) !important;
+  text-decoration: var(--link-decoration-hover);
+}
+
 .fast-external-embed-container:hover {
   border-color: var(--interactive-accent);
 }
