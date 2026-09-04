@@ -41,8 +41,285 @@ var import_obsidian2 = require("obsidian");
 
 // src/renderer.ts
 var import_obsidian = require("obsidian");
-var path = __toESM(require("path"));
+var path2 = __toESM(require("path"));
+var fs2 = __toESM(require("fs"));
+
+// src/local-file-server.ts
 var fs = __toESM(require("fs"));
+var http = __toESM(require("http"));
+var path = __toESM(require("path"));
+var import_crypto = require("crypto");
+var LocalFileServer = class {
+  constructor() {
+    this.sessionToken = (0, import_crypto.randomBytes)(24).toString("hex");
+    this.resourcesById = /* @__PURE__ */ new Map();
+    this.resourceIdByPath = /* @__PURE__ */ new Map();
+    this.activeStreams = /* @__PURE__ */ new Set();
+    this.server = null;
+    this.startPromise = null;
+    this.port = null;
+  }
+  async getFileUrl(filePath, mimeType) {
+    const normalizedPath = path.resolve(filePath);
+    const stat = await fs.promises.stat(normalizedPath);
+    if (!stat.isFile()) {
+      throw new Error(`\u8DEF\u5F84\u4E0D\u662F\u6587\u4EF6: ${normalizedPath}`);
+    }
+    let id = this.resourceIdByPath.get(normalizedPath);
+    if (!id) {
+      id = (0, import_crypto.randomBytes)(18).toString("hex");
+      this.resourceIdByPath.set(normalizedPath, id);
+      this.resourcesById.set(id, {
+        id,
+        filePath: normalizedPath,
+        mimeType,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        fullyServed: false,
+        fullTransferWaiters: /* @__PURE__ */ new Set()
+      });
+    } else {
+      const resource = this.resourcesById.get(id);
+      if (resource) {
+        resource.mimeType = mimeType;
+        if (resource.size !== stat.size || resource.mtimeMs !== stat.mtimeMs) {
+          resource.size = stat.size;
+          resource.mtimeMs = stat.mtimeMs;
+          resource.fullyServed = false;
+        }
+      }
+    }
+    const port = await this.ensureStarted();
+    const encodedName = encodeURIComponent(path.basename(normalizedPath));
+    return `http://127.0.0.1:${port}/resource/${this.sessionToken}/${id}/${encodedName}`;
+  }
+  waitForNextFullTransfer(filePath) {
+    const normalizedPath = path.resolve(filePath);
+    const id = this.resourceIdByPath.get(normalizedPath);
+    const resource = id ? this.resourcesById.get(id) : null;
+    if (!resource)
+      return Promise.resolve();
+    resource.fullyServed = false;
+    return new Promise((resolve2) => {
+      resource.fullTransferWaiters.add(resolve2);
+    });
+  }
+  cleanup() {
+    for (const stream of this.activeStreams) {
+      stream.destroy();
+    }
+    this.activeStreams.clear();
+    if (this.server) {
+      this.server.close();
+      this.server = null;
+    }
+    this.startPromise = null;
+    this.port = null;
+    for (const resource of this.resourcesById.values()) {
+      for (const resolve2 of resource.fullTransferWaiters)
+        resolve2();
+      resource.fullTransferWaiters.clear();
+    }
+    this.resourcesById.clear();
+    this.resourceIdByPath.clear();
+  }
+  ensureStarted() {
+    if (this.port !== null)
+      return Promise.resolve(this.port);
+    if (this.startPromise)
+      return this.startPromise;
+    this.startPromise = new Promise((resolve2, reject) => {
+      const server = http.createServer((request, response) => {
+        void this.handleRequest(request, response);
+      });
+      server.on("clientError", (_error, socket) => {
+        socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+      });
+      const fail = (error) => {
+        server.close();
+        this.server = null;
+        this.startPromise = null;
+        reject(error);
+      };
+      server.once("error", fail);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", fail);
+        server.on("error", (error) => {
+          console.error("Fast External Embed local server error:", error);
+        });
+        const address = server.address();
+        if (!address || typeof address.port !== "number") {
+          fail(new Error("\u65E0\u6CD5\u53D6\u5F97\u672C\u5730\u6587\u4EF6\u670D\u52A1\u7AEF\u53E3"));
+          return;
+        }
+        this.server = server;
+        this.port = address.port;
+        server.unref();
+        resolve2(address.port);
+      });
+    });
+    return this.startPromise;
+  }
+  async handleRequest(request, response) {
+    var _a, _b;
+    try {
+      if (request.method === "OPTIONS") {
+        response.writeHead(204, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+          "Access-Control-Allow-Headers": "Range, Content-Type",
+          "Access-Control-Max-Age": "86400"
+        });
+        response.end();
+        return;
+      }
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        response.writeHead(405, { Allow: "GET, HEAD, OPTIONS" });
+        response.end();
+        return;
+      }
+      const requestUrl = new URL(request.url || "/", "http://127.0.0.1");
+      const parts = requestUrl.pathname.split("/").filter(Boolean);
+      if (parts.length < 3 || parts[0] !== "resource" || parts[1] !== this.sessionToken) {
+        this.sendNotFound(response);
+        return;
+      }
+      const resource = this.resourcesById.get(parts[2]);
+      if (!resource) {
+        this.sendNotFound(response);
+        return;
+      }
+      const stat = await fs.promises.stat(resource.filePath);
+      if (!stat.isFile()) {
+        this.sendNotFound(response);
+        return;
+      }
+      const size = stat.size;
+      const etag = `"${size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}"`;
+      const commonHeaders = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Content-Type": resource.mimeType,
+        "Content-Disposition": this.createInlineDisposition(resource.filePath),
+        ETag: etag,
+        "Last-Modified": stat.mtime.toUTCString(),
+        "X-Content-Type-Options": "nosniff",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Expose-Headers": "Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified",
+        "Cross-Origin-Resource-Policy": "cross-origin"
+      };
+      if (request.headers["if-none-match"] === etag && !request.headers.range) {
+        this.markFullyServed(resource);
+        response.writeHead(304, commonHeaders);
+        response.end();
+        return;
+      }
+      let range = null;
+      if (request.headers.range) {
+        range = this.parseRange(request.headers.range, size);
+        if (!range) {
+          response.writeHead(416, {
+            ...commonHeaders,
+            "Content-Range": `bytes */${size}`
+          });
+          response.end();
+          return;
+        }
+      }
+      const start = (_a = range == null ? void 0 : range.start) != null ? _a : 0;
+      const end = (_b = range == null ? void 0 : range.end) != null ? _b : Math.max(size - 1, 0);
+      const contentLength = size === 0 ? 0 : end - start + 1;
+      const status = range ? 206 : 200;
+      const headers = {
+        ...commonHeaders,
+        "Content-Length": contentLength
+      };
+      if (range) {
+        headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+      }
+      response.writeHead(status, headers);
+      if (request.method === "HEAD" || size === 0) {
+        response.end();
+        return;
+      }
+      if (!range) {
+        response.once("finish", () => this.markFullyServed(resource));
+      }
+      const stream = fs.createReadStream(resource.filePath, { start, end });
+      this.activeStreams.add(stream);
+      const forgetStream = () => this.activeStreams.delete(stream);
+      stream.once("close", forgetStream);
+      stream.once("error", (error) => {
+        forgetStream();
+        if (!response.destroyed)
+          response.destroy(error);
+      });
+      response.once("close", () => {
+        if (!stream.destroyed)
+          stream.destroy();
+      });
+      stream.pipe(response);
+    } catch (error) {
+      if ((error == null ? void 0 : error.code) === "ENOENT" || (error == null ? void 0 : error.code) === "ENOTDIR") {
+        this.sendNotFound(response);
+        return;
+      }
+      console.error("Fast External Embed local file request error:", error);
+      if (!response.headersSent) {
+        response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end("Unable to read local file");
+      } else if (!response.destroyed) {
+        response.destroy(error);
+      }
+    }
+  }
+  parseRange(header, size) {
+    if (size <= 0)
+      return null;
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(header.trim());
+    if (!match || !match[1] && !match[2])
+      return null;
+    if (!match[1]) {
+      const suffixLength = Number(match[2]);
+      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0)
+        return null;
+      return {
+        start: Math.max(size - suffixLength, 0),
+        end: size - 1
+      };
+    }
+    const start = Number(match[1]);
+    const requestedEnd = match[2] ? Number(match[2]) : size - 1;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start < 0 || requestedEnd < start || start >= size) {
+      return null;
+    }
+    return {
+      start,
+      end: Math.min(requestedEnd, size - 1)
+    };
+  }
+  createInlineDisposition(filePath) {
+    const fallback = path.basename(filePath).replace(/[^\x20-\x7E]/g, "_");
+    const encoded = encodeURIComponent(path.basename(filePath));
+    return `inline; filename="${fallback.replace(/["\\]/g, "_")}"; filename*=UTF-8''${encoded}`;
+  }
+  markFullyServed(resource) {
+    resource.fullyServed = true;
+    for (const resolve2 of resource.fullTransferWaiters)
+      resolve2();
+    resource.fullTransferWaiters.clear();
+  }
+  sendNotFound(response) {
+    if (response.headersSent) {
+      response.end();
+      return;
+    }
+    response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    response.end("Not found");
+  }
+};
+
+// src/renderer.ts
 var EmbedRenderer = class {
   constructor(getSetting) {
     this.getSetting = getSetting;
@@ -50,6 +327,8 @@ var EmbedRenderer = class {
     this.maxCacheSize = 200 * 1024 * 1024;
     // 200MB 内存缓存上限
     this.currentCacheSize = 0;
+    this.localFileServer = new LocalFileServer();
+    this.pdfPreviewSessions = /* @__PURE__ */ new Set();
   }
   /**
    * 解析嵌入目标文本
@@ -114,7 +393,7 @@ var EmbedRenderer = class {
     } catch (_) {
     }
     if (!isHttp) {
-      cleanTarget = path.normalize(cleanTarget);
+      cleanTarget = path2.normalize(cleanTarget);
     }
     const dimensions = {};
     if (altText) {
@@ -128,7 +407,7 @@ var EmbedRenderer = class {
           dimensions.width = `${dimMatch[1]}px`;
       }
     }
-    const extension = path.extname(cleanTarget).toLowerCase();
+    const extension = path2.extname(cleanTarget).toLowerCase();
     return {
       isExternal: true,
       isHttp,
@@ -157,7 +436,7 @@ var EmbedRenderer = class {
       const titleEl = header.createEl("div", { cls: "fast-external-embed-title" });
       const iconEl = titleEl.createEl("span");
       this.setIconByExtension(iconEl, parsed.extension, parsed.isHttp);
-      const displayName = !parsed.isHttp ? path.basename(parsed.cleanTarget) : parsed.alt || parsed.cleanTarget;
+      const displayName = !parsed.isHttp ? path2.basename(parsed.cleanTarget) : parsed.alt || parsed.cleanTarget;
       titleEl.createEl("span", { text: displayName });
       const actions = header.createEl("div", { cls: "fast-external-embed-actions" });
       if (!parsed.isHttp) {
@@ -203,17 +482,34 @@ var EmbedRenderer = class {
       const playableUrl = await this.resolvePlayableUrl(parsed);
       const fullUrl = parsed.hash ? `${playableUrl}#${parsed.hash}` : playableUrl;
       if (parsed.extension === ".pdf") {
-        const iframe = body.createEl("iframe", {
+        const pdfHost = body.createDiv({ cls: "fast-external-pdf-host" });
+        pdfHost.style.height = customHeight;
+        if (customWidth !== "100%")
+          pdfHost.style.width = customWidth;
+        const iframe = pdfHost.createEl("iframe", {
           cls: "fast-external-embed-pdf",
           attr: {
-            src: fullUrl,
-            frameborder: "0"
+            frameborder: "0",
+            loading: "lazy"
           }
         });
         iframe.style.setProperty("--fast-embed-pdf-height", customHeight);
-        iframe.style.height = customHeight;
-        if (customWidth !== "100%")
-          iframe.style.width = customWidth;
+        iframe.style.height = "100%";
+        const preview = pdfHost.createDiv({
+          cls: "fast-external-pdf-preview"
+        });
+        const previewStatus = preview.createDiv({
+          cls: "fast-external-pdf-preview-status",
+          text: "\u6B63\u5728\u6309\u9700\u8BFB\u53D6\u5F53\u524D\u9875\u2026"
+        });
+        void this.showProgressivePdfPreview(
+          parsed,
+          playableUrl,
+          fullUrl,
+          iframe,
+          preview,
+          previewStatus
+        );
       } else if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"].includes(parsed.extension)) {
         const img = body.createEl("img", {
           cls: "fast-external-embed-img",
@@ -277,19 +573,25 @@ var EmbedRenderer = class {
       return parsed.cleanTarget;
     }
     const filePath = parsed.cleanTarget;
+    if (parsed.extension === ".pdf") {
+      return this.localFileServer.getFileUrl(
+        filePath,
+        this.getMimeType(parsed.extension)
+      );
+    }
     const cached = this.blobCache.get(filePath);
     if (cached) {
       cached.timestamp = Date.now();
       return cached.url;
     }
-    if (!fs.existsSync(filePath)) {
+    if (!fs2.existsSync(filePath)) {
       throw new Error(`\u6587\u4EF6\u4E0D\u5B58\u5728: ${filePath}`);
     }
-    const stat = await fs.promises.stat(filePath);
+    const stat = await fs2.promises.stat(filePath);
     if (!stat.isFile()) {
       throw new Error(`\u8DEF\u5F84\u4E0D\u662F\u6587\u4EF6: ${filePath}`);
     }
-    const buffer = await fs.promises.readFile(filePath);
+    const buffer = await fs2.promises.readFile(filePath);
     const mimeType = this.getMimeType(parsed.extension);
     const blob = new Blob([buffer], { type: mimeType });
     const blobUrl = URL.createObjectURL(blob);
@@ -319,6 +621,11 @@ var EmbedRenderer = class {
     this.currentCacheSize += size;
   }
   cleanup() {
+    this.localFileServer.cleanup();
+    for (const session of this.pdfPreviewSessions) {
+      session.destroy();
+    }
+    this.pdfPreviewSessions.clear();
     for (const item of this.blobCache.values()) {
       URL.revokeObjectURL(item.url);
     }
@@ -358,6 +665,160 @@ var EmbedRenderer = class {
       (0, import_obsidian.setIcon)(el, "globe");
     else
       (0, import_obsidian.setIcon)(el, "file");
+  }
+  async showProgressivePdfPreview(parsed, playableUrl, fullUrl, iframe, preview, status) {
+    let destroyed = false;
+    let loadingTask = null;
+    let renderTask = null;
+    let visibilityObserver = null;
+    let releaseVisibilityWait = null;
+    let disconnectTimer = null;
+    const session = {
+      destroy: () => {
+        var _a, _b;
+        if (destroyed)
+          return;
+        destroyed = true;
+        visibilityObserver == null ? void 0 : visibilityObserver.disconnect();
+        visibilityObserver = null;
+        releaseVisibilityWait == null ? void 0 : releaseVisibilityWait();
+        releaseVisibilityWait = null;
+        if (disconnectTimer !== null) {
+          window.clearInterval(disconnectTimer);
+          disconnectTimer = null;
+        }
+        try {
+          (_a = renderTask == null ? void 0 : renderTask.cancel) == null ? void 0 : _a.call(renderTask);
+        } catch (_) {
+        }
+        void ((_b = loadingTask == null ? void 0 : loadingTask.destroy) == null ? void 0 : _b.call(loadingTask));
+        preview.remove();
+        this.pdfPreviewSessions.delete(session);
+      }
+    };
+    this.pdfPreviewSessions.add(session);
+    disconnectTimer = window.setInterval(() => {
+      if (!preview.isConnected || !iframe.isConnected)
+        session.destroy();
+    }, 1e3);
+    let previewRendered = false;
+    try {
+      const rect = preview.getBoundingClientRect();
+      const isNearViewport = rect.bottom >= -800 && rect.top <= window.innerHeight + 800;
+      if (!isNearViewport && "IntersectionObserver" in window) {
+        await new Promise((resolve2) => {
+          releaseVisibilityWait = resolve2;
+          visibilityObserver = new IntersectionObserver(
+            (entries) => {
+              if (entries.some((entry) => entry.isIntersecting))
+                resolve2();
+            },
+            { rootMargin: "800px 0px" }
+          );
+          visibilityObserver.observe(preview);
+        });
+        releaseVisibilityWait = null;
+        visibilityObserver == null ? void 0 : visibilityObserver.disconnect();
+        visibilityObserver = null;
+      }
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+      const pdfjsLib = await (0, import_obsidian.loadPdfJs)();
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+      loadingTask = pdfjsLib.getDocument({
+        url: playableUrl,
+        disableRange: false,
+        disableStream: true,
+        disableAutoFetch: true,
+        rangeChunkSize: 256 * 1024,
+        withCredentials: false,
+        wasmUrl: new URL("lib/pdfjs/wasm/", window.location.href).href
+      });
+      const pdfDocument = await loadingTask.promise;
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+      const requestedPage = Number.parseInt(parsed.params.page || "1", 10);
+      const pageNumber = Math.min(
+        Math.max(Number.isFinite(requestedPage) ? requestedPage : 1, 1),
+        pdfDocument.numPages
+      );
+      const page = await pdfDocument.getPage(pageNumber);
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+      const baseViewport = page.getViewport({ scale: 1 });
+      const availableWidth = Math.max(preview.clientWidth - 32, 320);
+      const cssScale = Math.min(availableWidth / baseViewport.width, 2);
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const renderViewport = page.getViewport({
+        scale: cssScale * pixelRatio
+      });
+      const canvasWrap = preview.createDiv({
+        cls: "fast-external-pdf-preview-canvas-wrap"
+      });
+      const canvas = canvasWrap.createEl("canvas");
+      canvas.width = Math.ceil(renderViewport.width);
+      canvas.height = Math.ceil(renderViewport.height);
+      canvas.style.width = `${Math.ceil(renderViewport.width / pixelRatio)}px`;
+      canvas.style.height = `${Math.ceil(renderViewport.height / pixelRatio)}px`;
+      const canvasContext = canvas.getContext("2d");
+      if (!canvasContext)
+        throw new Error("\u65E0\u6CD5\u521B\u5EFA PDF \u9884\u89C8\u753B\u5E03");
+      renderTask = page.render({
+        canvas,
+        canvasContext,
+        viewport: renderViewport,
+        background: "rgb(255,255,255)"
+      });
+      await renderTask.promise;
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+      previewRendered = true;
+      preview.addClass("is-ready");
+      status.setText(
+        `\u7B2C ${pageNumber} / ${pdfDocument.numPages} \u9875 \xB7 \u5B8C\u6574\u9605\u8BFB\u5668\u6B63\u5728\u540E\u53F0\u8F7D\u5165`
+      );
+    } catch (error) {
+      if (!destroyed) {
+        console.warn(
+          "Fast External Embed progressive PDF preview unavailable:",
+          error
+        );
+      }
+    }
+    if (destroyed)
+      return;
+    if (!iframe.isConnected) {
+      session.destroy();
+      return;
+    }
+    const fullTransfer = this.localFileServer.waitForNextFullTransfer(
+      parsed.cleanTarget
+    );
+    iframe.src = fullUrl;
+    if (!previewRendered) {
+      session.destroy();
+      return;
+    }
+    await Promise.race([
+      fullTransfer,
+      new Promise((resolve2) => window.setTimeout(resolve2, 9e4))
+    ]);
+    if (destroyed || !preview.isConnected)
+      return;
+    await new Promise((resolve2) => window.setTimeout(resolve2, 700));
+    preview.addClass("is-complete");
+    window.setTimeout(() => session.destroy(), 220);
   }
   getMimeType(ext) {
     const map = {

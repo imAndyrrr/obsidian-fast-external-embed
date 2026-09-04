@@ -62,11 +62,16 @@ Or add a height parameter to a local file:
 
 ## Performance
 
-Local PDF files are loaded into an in-memory Blob URL and displayed by Chromium's native PDF viewer. This avoids a separate JavaScript PDF engine, but very large files can still consume substantial memory while open. Close the note or reload the plugin to release cached local file data.
+Local PDFs are served through a loopback-only, session-token-protected endpoint with HTTP byte-range support. A range-loaded preview displays the requested page first, while Chromium's complete PDF viewer continues loading in the background. The plugin no longer has to copy the complete PDF into an in-memory Blob before anything can be displayed, which improves first-page latency and substantially reduces memory pressure for large PDFs.
+
+PDFs outside the visible area are deferred until they approach the viewport, reducing unnecessary work in notes containing multiple embeds.
+
+Other compatible local media types currently continue to use short-lived in-memory Blob URLs. Close the note or reload the plugin to release cached local media data.
 
 ## Security and privacy
 
 - Only use external local paths in notes you trust. An embedded path can cause Obsidian to read that local file for display.
+- The local PDF endpoint binds only to `127.0.0.1`, uses an unguessable per-session token, and exposes only files explicitly registered by the plugin.
 - External web pages run in a sandboxed iframe. The plugin does not upload local files or note contents.
 - The plugin is desktop-only because it uses local filesystem APIs for files outside the vault.
 

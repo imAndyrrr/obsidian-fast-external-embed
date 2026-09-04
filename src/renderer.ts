@@ -1,6 +1,7 @@
-import { Notice, setIcon } from "obsidian";
+import { loadPdfJs, Notice, setIcon } from "obsidian";
 import * as path from "path";
 import * as fs from "fs";
+import { LocalFileServer } from "./local-file-server";
 
 export interface ParsedEmbedTarget {
   isExternal: boolean;
@@ -18,6 +19,8 @@ export class EmbedRenderer {
   private blobCache: Map<string, { url: string; size: number; timestamp: number }> = new Map();
   private maxCacheSize: number = 200 * 1024 * 1024; // 200MB 内存缓存上限
   private currentCacheSize: number = 0;
+  private localFileServer = new LocalFileServer();
+  private pdfPreviewSessions = new Set<{ destroy: () => void }>();
 
   constructor(private getSetting: (key: string) => any) {}
 
@@ -207,17 +210,38 @@ export class EmbedRenderer {
       const fullUrl = parsed.hash ? `${playableUrl}#${parsed.hash}` : playableUrl;
 
       if (parsed.extension === ".pdf") {
-        // 利用 Chromium 原生 C++ PDF 引擎渲染
-        const iframe = body.createEl("iframe", {
+        const pdfHost = body.createDiv({ cls: "fast-external-pdf-host" });
+        pdfHost.style.height = customHeight;
+        if (customWidth !== "100%") pdfHost.style.width = customWidth;
+
+        // Chromium 的完整 PDF 阅读器在后台载入；PDF.js 先按需读取并显示当前页，
+        // 避免非线性化的大 PDF 在完整传输前长时间只显示空白区域。
+        const iframe = pdfHost.createEl("iframe", {
           cls: "fast-external-embed-pdf",
           attr: {
-            src: fullUrl,
             frameborder: "0",
+            loading: "lazy",
           },
         });
         iframe.style.setProperty("--fast-embed-pdf-height", customHeight);
-        iframe.style.height = customHeight;
-        if (customWidth !== "100%") iframe.style.width = customWidth;
+        iframe.style.height = "100%";
+
+        const preview = pdfHost.createDiv({
+          cls: "fast-external-pdf-preview",
+        });
+        const previewStatus = preview.createDiv({
+          cls: "fast-external-pdf-preview-status",
+          text: "正在按需读取当前页…",
+        });
+
+        void this.showProgressivePdfPreview(
+          parsed,
+          playableUrl,
+          fullUrl,
+          iframe,
+          preview,
+          previewStatus
+        );
       } else if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"].includes(parsed.extension)) {
         const img = body.createEl("img", {
           cls: "fast-external-embed-img",
@@ -282,6 +306,12 @@ export class EmbedRenderer {
     }
 
     const filePath = parsed.cleanTarget;
+    if (parsed.extension === ".pdf") {
+      return this.localFileServer.getFileUrl(
+        filePath,
+        this.getMimeType(parsed.extension)
+      );
+    }
 
     // 检查缓存
     const cached = this.blobCache.get(filePath);
@@ -336,6 +366,11 @@ export class EmbedRenderer {
   }
 
   public cleanup() {
+    this.localFileServer.cleanup();
+    for (const session of this.pdfPreviewSessions) {
+      session.destroy();
+    }
+    this.pdfPreviewSessions.clear();
     for (const item of this.blobCache.values()) {
       URL.revokeObjectURL(item.url);
     }
@@ -372,6 +407,178 @@ export class EmbedRenderer {
     else if ([".mp3", ".wav", ".ogg", ".flac"].includes(ext)) setIcon(el, "audio-file");
     else if (isHttp) setIcon(el, "globe");
     else setIcon(el, "file");
+  }
+
+  private async showProgressivePdfPreview(
+    parsed: ParsedEmbedTarget,
+    playableUrl: string,
+    fullUrl: string,
+    iframe: HTMLIFrameElement,
+    preview: HTMLElement,
+    status: HTMLElement
+  ): Promise<void> {
+    let destroyed = false;
+    let loadingTask: any = null;
+    let renderTask: any = null;
+    let visibilityObserver: IntersectionObserver | null = null;
+    let releaseVisibilityWait: (() => void) | null = null;
+    let disconnectTimer: number | null = null;
+    const session = {
+      destroy: () => {
+        if (destroyed) return;
+        destroyed = true;
+        visibilityObserver?.disconnect();
+        visibilityObserver = null;
+        releaseVisibilityWait?.();
+        releaseVisibilityWait = null;
+        if (disconnectTimer !== null) {
+          window.clearInterval(disconnectTimer);
+          disconnectTimer = null;
+        }
+        try {
+          renderTask?.cancel?.();
+        } catch (_) {
+          // Ignore cancellation races.
+        }
+        void loadingTask?.destroy?.();
+        preview.remove();
+        this.pdfPreviewSessions.delete(session);
+      },
+    };
+    this.pdfPreviewSessions.add(session);
+    disconnectTimer = window.setInterval(() => {
+      if (!preview.isConnected || !iframe.isConnected) session.destroy();
+    }, 1_000);
+
+    let previewRendered = false;
+    try {
+      const rect = preview.getBoundingClientRect();
+      const isNearViewport =
+        rect.bottom >= -800 && rect.top <= window.innerHeight + 800;
+      if (!isNearViewport && "IntersectionObserver" in window) {
+        await new Promise<void>((resolve) => {
+          releaseVisibilityWait = resolve;
+          visibilityObserver = new IntersectionObserver(
+            (entries) => {
+              if (entries.some((entry) => entry.isIntersecting)) resolve();
+            },
+            { rootMargin: "800px 0px" }
+          );
+          visibilityObserver.observe(preview);
+        });
+        releaseVisibilityWait = null;
+        visibilityObserver?.disconnect();
+        visibilityObserver = null;
+      }
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+
+      const pdfjsLib = await loadPdfJs();
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+
+      loadingTask = pdfjsLib.getDocument({
+        url: playableUrl,
+        disableRange: false,
+        disableStream: true,
+        disableAutoFetch: true,
+        rangeChunkSize: 256 * 1024,
+        withCredentials: false,
+        wasmUrl: new URL("lib/pdfjs/wasm/", window.location.href).href,
+      });
+
+      const pdfDocument = await loadingTask.promise;
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+
+      const requestedPage = Number.parseInt(parsed.params.page || "1", 10);
+      const pageNumber = Math.min(
+        Math.max(Number.isFinite(requestedPage) ? requestedPage : 1, 1),
+        pdfDocument.numPages
+      );
+      const page = await pdfDocument.getPage(pageNumber);
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+
+      const baseViewport = page.getViewport({ scale: 1 });
+      const availableWidth = Math.max(preview.clientWidth - 32, 320);
+      const cssScale = Math.min(availableWidth / baseViewport.width, 2);
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const renderViewport = page.getViewport({
+        scale: cssScale * pixelRatio,
+      });
+
+      const canvasWrap = preview.createDiv({
+        cls: "fast-external-pdf-preview-canvas-wrap",
+      });
+      const canvas = canvasWrap.createEl("canvas");
+      canvas.width = Math.ceil(renderViewport.width);
+      canvas.height = Math.ceil(renderViewport.height);
+      canvas.style.width = `${Math.ceil(renderViewport.width / pixelRatio)}px`;
+      canvas.style.height = `${Math.ceil(renderViewport.height / pixelRatio)}px`;
+
+      const canvasContext = canvas.getContext("2d");
+      if (!canvasContext) throw new Error("无法创建 PDF 预览画布");
+
+      renderTask = page.render({
+        canvas,
+        canvasContext,
+        viewport: renderViewport,
+        background: "rgb(255,255,255)",
+      });
+      await renderTask.promise;
+      if (destroyed || !preview.isConnected) {
+        session.destroy();
+        return;
+      }
+
+      previewRendered = true;
+      preview.addClass("is-ready");
+      status.setText(
+        `第 ${pageNumber} / ${pdfDocument.numPages} 页 · 完整阅读器正在后台载入`
+      );
+    } catch (error) {
+      if (!destroyed) {
+        console.warn(
+          "Fast External Embed progressive PDF preview unavailable:",
+          error
+        );
+      }
+    }
+
+    if (destroyed) return;
+    if (!iframe.isConnected) {
+      session.destroy();
+      return;
+    }
+
+    const fullTransfer = this.localFileServer.waitForNextFullTransfer(
+      parsed.cleanTarget
+    );
+    iframe.src = fullUrl;
+
+    if (!previewRendered) {
+      session.destroy();
+      return;
+    }
+
+    await Promise.race([
+      fullTransfer,
+      new Promise<void>((resolve) => window.setTimeout(resolve, 90_000)),
+    ]);
+    if (destroyed || !preview.isConnected) return;
+
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 700));
+    preview.addClass("is-complete");
+    window.setTimeout(() => session.destroy(), 220);
   }
 
   private getMimeType(ext: string): string {
