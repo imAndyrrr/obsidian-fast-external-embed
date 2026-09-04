@@ -72,37 +72,16 @@ var LocalFileServer = class {
       this.resourcesById.set(id, {
         id,
         filePath: normalizedPath,
-        mimeType,
-        size: stat.size,
-        mtimeMs: stat.mtimeMs,
-        fullyServed: false,
-        fullTransferWaiters: /* @__PURE__ */ new Set()
+        mimeType
       });
     } else {
       const resource = this.resourcesById.get(id);
-      if (resource) {
+      if (resource)
         resource.mimeType = mimeType;
-        if (resource.size !== stat.size || resource.mtimeMs !== stat.mtimeMs) {
-          resource.size = stat.size;
-          resource.mtimeMs = stat.mtimeMs;
-          resource.fullyServed = false;
-        }
-      }
     }
     const port = await this.ensureStarted();
     const encodedName = encodeURIComponent(path.basename(normalizedPath));
     return `http://127.0.0.1:${port}/resource/${this.sessionToken}/${id}/${encodedName}`;
-  }
-  waitForNextFullTransfer(filePath) {
-    const normalizedPath = path.resolve(filePath);
-    const id = this.resourceIdByPath.get(normalizedPath);
-    const resource = id ? this.resourcesById.get(id) : null;
-    if (!resource)
-      return Promise.resolve();
-    resource.fullyServed = false;
-    return new Promise((resolve2) => {
-      resource.fullTransferWaiters.add(resolve2);
-    });
   }
   cleanup() {
     for (const stream of this.activeStreams) {
@@ -115,11 +94,6 @@ var LocalFileServer = class {
     }
     this.startPromise = null;
     this.port = null;
-    for (const resource of this.resourcesById.values()) {
-      for (const resolve2 of resource.fullTransferWaiters)
-        resolve2();
-      resource.fullTransferWaiters.clear();
-    }
     this.resourcesById.clear();
     this.resourceIdByPath.clear();
   }
@@ -209,7 +183,6 @@ var LocalFileServer = class {
         "Cross-Origin-Resource-Policy": "cross-origin"
       };
       if (request.headers["if-none-match"] === etag && !request.headers.range) {
-        this.markFullyServed(resource);
         response.writeHead(304, commonHeaders);
         response.end();
         return;
@@ -241,9 +214,6 @@ var LocalFileServer = class {
       if (request.method === "HEAD" || size === 0) {
         response.end();
         return;
-      }
-      if (!range) {
-        response.once("finish", () => this.markFullyServed(resource));
       }
       const stream = fs.createReadStream(resource.filePath, { start, end });
       this.activeStreams.add(stream);
@@ -302,12 +272,6 @@ var LocalFileServer = class {
     const fallback = path.basename(filePath).replace(/[^\x20-\x7E]/g, "_");
     const encoded = encodeURIComponent(path.basename(filePath));
     return `inline; filename="${fallback.replace(/["\\]/g, "_")}"; filename*=UTF-8''${encoded}`;
-  }
-  markFullyServed(resource) {
-    resource.fullyServed = true;
-    for (const resolve2 of resource.fullTransferWaiters)
-      resolve2();
-    resource.fullTransferWaiters.clear();
   }
   sendNotFound(response) {
     if (response.headersSent) {
@@ -486,30 +450,7 @@ var EmbedRenderer = class {
         pdfHost.style.height = customHeight;
         if (customWidth !== "100%")
           pdfHost.style.width = customWidth;
-        const iframe = pdfHost.createEl("iframe", {
-          cls: "fast-external-embed-pdf",
-          attr: {
-            frameborder: "0",
-            loading: "lazy"
-          }
-        });
-        iframe.style.setProperty("--fast-embed-pdf-height", customHeight);
-        iframe.style.height = "100%";
-        const preview = pdfHost.createDiv({
-          cls: "fast-external-pdf-preview"
-        });
-        const previewStatus = preview.createDiv({
-          cls: "fast-external-pdf-preview-status",
-          text: "\u6B63\u5728\u6309\u9700\u8BFB\u53D6\u5F53\u524D\u9875\u2026"
-        });
-        void this.showProgressivePdfPreview(
-          parsed,
-          playableUrl,
-          fullUrl,
-          iframe,
-          preview,
-          previewStatus
-        );
+        void this.showProgressivePdfViewer(parsed, playableUrl, pdfHost);
       } else if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"].includes(parsed.extension)) {
         const img = body.createEl("img", {
           cls: "fast-external-embed-img",
@@ -666,67 +607,325 @@ var EmbedRenderer = class {
     else
       (0, import_obsidian.setIcon)(el, "file");
   }
-  async showProgressivePdfPreview(parsed, playableUrl, fullUrl, iframe, preview, status) {
+  async showProgressivePdfViewer(parsed, playableUrl, host) {
+    var _a;
     let destroyed = false;
     let loadingTask = null;
-    let renderTask = null;
-    let visibilityObserver = null;
-    let releaseVisibilityWait = null;
+    let documentProxy = null;
+    let hostObserver = null;
+    let pageObserver = null;
+    let resizeObserver = null;
+    let releaseHostWait = null;
     let disconnectTimer = null;
+    let resizeTimer = null;
+    let scrollFrame = null;
+    let lastMeasuredWidth = 0;
+    let zoom = 1;
+    let baseAspectRatio = 1.414;
+    let currentPage = 1;
+    const pageStates = /* @__PURE__ */ new Map();
+    const toolbar = host.createDiv({ cls: "fast-external-pdf-toolbar" });
+    const previousButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "\u4E0A\u4E00\u9875", title: "\u4E0A\u4E00\u9875" }
+    });
+    (0, import_obsidian.setIcon)(previousButton, "chevron-up");
+    const pageInput = toolbar.createEl("input", {
+      cls: "fast-external-pdf-page-input",
+      type: "number",
+      attr: { min: "1", value: "1", "aria-label": "\u5F53\u524D\u9875" }
+    });
+    const pageTotal = toolbar.createEl("span", {
+      cls: "fast-external-pdf-page-total",
+      text: "/ \u2026"
+    });
+    const nextButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "\u4E0B\u4E00\u9875", title: "\u4E0B\u4E00\u9875" }
+    });
+    (0, import_obsidian.setIcon)(nextButton, "chevron-down");
+    toolbar.createDiv({ cls: "fast-external-pdf-toolbar-spacer" });
+    const zoomOutButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "\u7F29\u5C0F", title: "\u7F29\u5C0F" }
+    });
+    (0, import_obsidian.setIcon)(zoomOutButton, "zoom-out");
+    const zoomLabel = toolbar.createEl("span", {
+      cls: "fast-external-pdf-zoom-label",
+      text: "100%"
+    });
+    const zoomInButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "\u653E\u5927", title: "\u653E\u5927" }
+    });
+    (0, import_obsidian.setIcon)(zoomInButton, "zoom-in");
+    const scrollContainer = host.createDiv({
+      cls: "fast-external-pdf-scroll"
+    });
+    const loadingStatus = scrollContainer.createDiv({
+      cls: "fast-external-pdf-loading",
+      text: "\u6B63\u5728\u8BFB\u53D6 PDF \u76EE\u5F55\u2026"
+    });
+    const pagesContainer = scrollContainer.createDiv({
+      cls: "fast-external-pdf-pages"
+    });
+    const cancelPage = (state) => {
+      var _a2, _b;
+      try {
+        (_b = (_a2 = state.renderTask) == null ? void 0 : _a2.cancel) == null ? void 0 : _b.call(_a2);
+      } catch (_) {
+      }
+      state.renderTask = null;
+      state.loading = null;
+    };
+    const clearPage = (state) => {
+      var _a2;
+      cancelPage(state);
+      (_a2 = state.canvas) == null ? void 0 : _a2.remove();
+      state.canvas = null;
+      state.renderedZoom = null;
+      state.status.removeClass("is-hidden");
+      state.status.setText(`\u7B2C ${state.pageNumber} \u9875`);
+    };
     const session = {
       destroy: () => {
-        var _a, _b;
+        var _a2;
         if (destroyed)
           return;
         destroyed = true;
-        visibilityObserver == null ? void 0 : visibilityObserver.disconnect();
-        visibilityObserver = null;
-        releaseVisibilityWait == null ? void 0 : releaseVisibilityWait();
-        releaseVisibilityWait = null;
+        hostObserver == null ? void 0 : hostObserver.disconnect();
+        hostObserver = null;
+        pageObserver == null ? void 0 : pageObserver.disconnect();
+        pageObserver = null;
+        resizeObserver == null ? void 0 : resizeObserver.disconnect();
+        resizeObserver = null;
+        releaseHostWait == null ? void 0 : releaseHostWait();
+        releaseHostWait = null;
         if (disconnectTimer !== null) {
           window.clearInterval(disconnectTimer);
           disconnectTimer = null;
         }
-        try {
-          (_a = renderTask == null ? void 0 : renderTask.cancel) == null ? void 0 : _a.call(renderTask);
-        } catch (_) {
+        if (resizeTimer !== null) {
+          window.clearTimeout(resizeTimer);
+          resizeTimer = null;
         }
-        void ((_b = loadingTask == null ? void 0 : loadingTask.destroy) == null ? void 0 : _b.call(loadingTask));
-        preview.remove();
+        if (scrollFrame !== null) {
+          window.cancelAnimationFrame(scrollFrame);
+          scrollFrame = null;
+        }
+        for (const state of pageStates.values()) {
+          cancelPage(state);
+        }
+        void ((_a2 = loadingTask == null ? void 0 : loadingTask.destroy) == null ? void 0 : _a2.call(loadingTask));
+        documentProxy = null;
         this.pdfPreviewSessions.delete(session);
       }
     };
     this.pdfPreviewSessions.add(session);
     disconnectTimer = window.setInterval(() => {
-      if (!preview.isConnected || !iframe.isConnected)
+      if (!host.isConnected)
         session.destroy();
     }, 1e3);
-    let previewRendered = false;
-    try {
-      const rect = preview.getBoundingClientRect();
-      const isNearViewport = rect.bottom >= -800 && rect.top <= window.innerHeight + 800;
-      if (!isNearViewport && "IntersectionObserver" in window) {
-        await new Promise((resolve2) => {
-          releaseVisibilityWait = resolve2;
-          visibilityObserver = new IntersectionObserver(
-            (entries) => {
-              if (entries.some((entry) => entry.isIntersecting))
-                resolve2();
-            },
-            { rootMargin: "800px 0px" }
-          );
-          visibilityObserver.observe(preview);
-        });
-        releaseVisibilityWait = null;
-        visibilityObserver == null ? void 0 : visibilityObserver.disconnect();
-        visibilityObserver = null;
+    const waitUntilNearViewport = async () => {
+      const rect = host.getBoundingClientRect();
+      if (rect.bottom >= -800 && rect.top <= window.innerHeight + 800)
+        return;
+      if (!("IntersectionObserver" in window))
+        return;
+      await new Promise((resolve2) => {
+        releaseHostWait = resolve2;
+        hostObserver = new IntersectionObserver(
+          (entries) => {
+            if (entries.some((entry) => entry.isIntersecting))
+              resolve2();
+          },
+          { rootMargin: "800px 0px" }
+        );
+        hostObserver.observe(host);
+      });
+      releaseHostWait = null;
+      hostObserver == null ? void 0 : hostObserver.disconnect();
+      hostObserver = null;
+    };
+    const availablePageWidth = () => Math.max(scrollContainer.clientWidth - 32, 320);
+    const updatePlaceholderSize = (state) => {
+      const width = availablePageWidth() * zoom;
+      const height = width * state.aspectRatio;
+      state.element.style.width = `${Math.round(width)}px`;
+      state.element.style.minHeight = `${Math.round(height)}px`;
+    };
+    const updateAllPlaceholderSizes = () => {
+      for (const state of pageStates.values())
+        updatePlaceholderSize(state);
+    };
+    const updateCurrentPage = (pageNumber) => {
+      currentPage = Math.min(
+        Math.max(pageNumber, 1),
+        (documentProxy == null ? void 0 : documentProxy.numPages) || 1
+      );
+      pageInput.value = String(currentPage);
+      previousButton.disabled = currentPage <= 1;
+      nextButton.disabled = !documentProxy || currentPage >= documentProxy.numPages;
+    };
+    const updateCurrentPageFromScroll = () => {
+      scrollFrame = null;
+      if (!documentProxy || pageStates.size === 0)
+        return;
+      const readingLine = scrollContainer.scrollTop + scrollContainer.clientHeight * 0.3;
+      let closestPage = 1;
+      let closestDistance = Number.POSITIVE_INFINITY;
+      for (const state of pageStates.values()) {
+        const pageCenter = state.element.offsetTop + state.element.offsetHeight * 0.5;
+        const distance = Math.abs(pageCenter - readingLine);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestPage = state.pageNumber;
+        }
       }
-      if (destroyed || !preview.isConnected) {
+      updateCurrentPage(closestPage);
+    };
+    scrollContainer.addEventListener("scroll", () => {
+      if (scrollFrame !== null)
+        return;
+      scrollFrame = window.requestAnimationFrame(updateCurrentPageFromScroll);
+    });
+    const evictDistantPages = () => {
+      const rendered = [...pageStates.values()].filter(
+        (state) => state.canvas && !state.visible
+      );
+      if (rendered.length <= 8)
+        return;
+      rendered.sort((a, b) => {
+        const distanceA = Math.abs(a.pageNumber - currentPage);
+        const distanceB = Math.abs(b.pageNumber - currentPage);
+        if (distanceA !== distanceB)
+          return distanceB - distanceA;
+        return a.lastVisibleAt - b.lastVisibleAt;
+      }).slice(0, rendered.length - 8).forEach(clearPage);
+    };
+    const renderPage = (state) => {
+      if (destroyed || !documentProxy || state.loading || state.renderedZoom === zoom) {
+        return state.loading || Promise.resolve();
+      }
+      state.loading = (async () => {
+        var _a2;
+        clearPage(state);
+        state.status.setText(`\u6B63\u5728\u8BFB\u53D6\u7B2C ${state.pageNumber} \u9875\u2026`);
+        const page = await documentProxy.getPage(state.pageNumber);
+        if (destroyed || !state.element.isConnected)
+          return;
+        const baseViewport = page.getViewport({ scale: 1 });
+        state.aspectRatio = baseViewport.height / baseViewport.width;
+        updatePlaceholderSize(state);
+        const cssWidth = availablePageWidth() * zoom;
+        const cssScale = cssWidth / baseViewport.width;
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        const renderViewport = page.getViewport({
+          scale: cssScale * pixelRatio
+        });
+        const canvas = state.surface.createEl("canvas");
+        canvas.width = Math.ceil(renderViewport.width);
+        canvas.height = Math.ceil(renderViewport.height);
+        canvas.style.width = `${Math.ceil(renderViewport.width / pixelRatio)}px`;
+        canvas.style.height = `${Math.ceil(
+          renderViewport.height / pixelRatio
+        )}px`;
+        const canvasContext = canvas.getContext("2d");
+        if (!canvasContext)
+          throw new Error("\u65E0\u6CD5\u521B\u5EFA PDF \u9875\u9762\u753B\u5E03");
+        state.canvas = canvas;
+        state.renderTask = page.render({
+          canvas,
+          canvasContext,
+          viewport: renderViewport,
+          background: "rgb(255,255,255)"
+        });
+        await state.renderTask.promise;
+        if (destroyed || state.canvas !== canvas)
+          return;
+        state.renderedZoom = zoom;
+        state.status.addClass("is-hidden");
+        state.lastVisibleAt = Date.now();
+        state.renderTask = null;
+        (_a2 = page.cleanup) == null ? void 0 : _a2.call(page);
+        evictDistantPages();
+      })().catch((error) => {
+        if ((error == null ? void 0 : error.name) !== "RenderingCancelledException" && !destroyed) {
+          console.warn(
+            `Fast External Embed could not render PDF page ${state.pageNumber}:`,
+            error
+          );
+          state.status.setText(`\u7B2C ${state.pageNumber} \u9875\u8F7D\u5165\u5931\u8D25`);
+        }
+      }).finally(() => {
+        state.loading = null;
+      });
+      return state.loading;
+    };
+    const goToPage = (pageNumber) => {
+      const state = pageStates.get(
+        Math.min(Math.max(pageNumber, 1), (documentProxy == null ? void 0 : documentProxy.numPages) || 1)
+      );
+      if (!state)
+        return;
+      updateCurrentPage(state.pageNumber);
+      scrollContainer.scrollTo({
+        top: Math.max(state.element.offsetTop - 8, 0),
+        behavior: "smooth"
+      });
+      void renderPage(state);
+    };
+    const setZoom = (nextZoom) => {
+      const bounded = Math.min(Math.max(nextZoom, 0.5), 2.5);
+      if (Math.abs(bounded - zoom) < 1e-3)
+        return;
+      zoom = bounded;
+      zoomLabel.setText(`${Math.round(zoom * 100)}%`);
+      for (const state of pageStates.values())
+        clearPage(state);
+      updateAllPlaceholderSizes();
+      for (const state of pageStates.values()) {
+        if (state.visible)
+          void renderPage(state);
+      }
+      requestAnimationFrame(() => goToPage(currentPage));
+    };
+    previousButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      goToPage(currentPage - 1);
+    });
+    nextButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      goToPage(currentPage + 1);
+    });
+    pageInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      const requested = Number.parseInt(pageInput.value, 10);
+      if (Number.isFinite(requested))
+        goToPage(requested);
+      else
+        updateCurrentPage(currentPage);
+    });
+    zoomOutButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setZoom(zoom - 0.15);
+    });
+    zoomInButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setZoom(zoom + 0.15);
+    });
+    zoomLabel.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setZoom(1);
+    });
+    try {
+      await waitUntilNearViewport();
+      if (destroyed || !host.isConnected) {
         session.destroy();
         return;
       }
       const pdfjsLib = await (0, import_obsidian.loadPdfJs)();
-      if (destroyed || !preview.isConnected) {
+      if (destroyed || !host.isConnected) {
         session.destroy();
         return;
       }
@@ -739,86 +938,120 @@ var EmbedRenderer = class {
         withCredentials: false,
         wasmUrl: new URL("lib/pdfjs/wasm/", window.location.href).href
       });
-      const pdfDocument = await loadingTask.promise;
-      if (destroyed || !preview.isConnected) {
+      documentProxy = await loadingTask.promise;
+      if (destroyed || !host.isConnected) {
         session.destroy();
         return;
       }
       const requestedPage = Number.parseInt(parsed.params.page || "1", 10);
-      const pageNumber = Math.min(
+      const initialPage = Math.min(
         Math.max(Number.isFinite(requestedPage) ? requestedPage : 1, 1),
-        pdfDocument.numPages
+        documentProxy.numPages
       );
-      const page = await pdfDocument.getPage(pageNumber);
-      if (destroyed || !preview.isConnected) {
-        session.destroy();
-        return;
+      currentPage = initialPage;
+      pageInput.max = String(documentProxy.numPages);
+      pageTotal.setText(`/ ${documentProxy.numPages}`);
+      const firstPage = await documentProxy.getPage(initialPage);
+      const firstViewport = firstPage.getViewport({ scale: 1 });
+      baseAspectRatio = firstViewport.height / firstViewport.width;
+      (_a = firstPage.cleanup) == null ? void 0 : _a.call(firstPage);
+      loadingStatus.remove();
+      for (let pageNumber = 1; pageNumber <= documentProxy.numPages; pageNumber++) {
+        const element = pagesContainer.createDiv({
+          cls: "fast-external-pdf-page",
+          attr: {
+            "data-page-number": String(pageNumber),
+            "aria-label": `\u7B2C ${pageNumber} \u9875`
+          }
+        });
+        const surface = element.createDiv({
+          cls: "fast-external-pdf-page-surface"
+        });
+        const status = surface.createDiv({
+          cls: "fast-external-pdf-page-status",
+          text: `\u7B2C ${pageNumber} \u9875`
+        });
+        const state = {
+          pageNumber,
+          element,
+          surface,
+          status,
+          canvas: null,
+          renderTask: null,
+          loading: null,
+          visible: false,
+          lastVisibleAt: 0,
+          aspectRatio: baseAspectRatio,
+          renderedZoom: null
+        };
+        pageStates.set(pageNumber, state);
+        updatePlaceholderSize(state);
       }
-      const baseViewport = page.getViewport({ scale: 1 });
-      const availableWidth = Math.max(preview.clientWidth - 32, 320);
-      const cssScale = Math.min(availableWidth / baseViewport.width, 2);
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const renderViewport = page.getViewport({
-        scale: cssScale * pixelRatio
-      });
-      const canvasWrap = preview.createDiv({
-        cls: "fast-external-pdf-preview-canvas-wrap"
-      });
-      const canvas = canvasWrap.createEl("canvas");
-      canvas.width = Math.ceil(renderViewport.width);
-      canvas.height = Math.ceil(renderViewport.height);
-      canvas.style.width = `${Math.ceil(renderViewport.width / pixelRatio)}px`;
-      canvas.style.height = `${Math.ceil(renderViewport.height / pixelRatio)}px`;
-      const canvasContext = canvas.getContext("2d");
-      if (!canvasContext)
-        throw new Error("\u65E0\u6CD5\u521B\u5EFA PDF \u9884\u89C8\u753B\u5E03");
-      renderTask = page.render({
-        canvas,
-        canvasContext,
-        viewport: renderViewport,
-        background: "rgb(255,255,255)"
-      });
-      await renderTask.promise;
-      if (destroyed || !preview.isConnected) {
-        session.destroy();
-        return;
-      }
-      previewRendered = true;
-      preview.addClass("is-ready");
-      status.setText(
-        `\u7B2C ${pageNumber} / ${pdfDocument.numPages} \u9875 \xB7 \u5B8C\u6574\u9605\u8BFB\u5668\u6B63\u5728\u540E\u53F0\u8F7D\u5165`
+      pageObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            const pageNumber = Number.parseInt(
+              entry.target.dataset.pageNumber || "",
+              10
+            );
+            const state = pageStates.get(pageNumber);
+            if (!state)
+              continue;
+            state.visible = entry.isIntersecting;
+            if (entry.isIntersecting) {
+              state.lastVisibleAt = Date.now();
+              void renderPage(state);
+            }
+          }
+          evictDistantPages();
+        },
+        {
+          root: scrollContainer,
+          rootMargin: "100% 0px",
+          threshold: [0, 0.1, 0.25, 0.5, 0.75]
+        }
       );
+      for (const state of pageStates.values()) {
+        pageObserver.observe(state.element);
+      }
+      resizeObserver = new ResizeObserver(() => {
+        if (destroyed)
+          return;
+        const measuredWidth = scrollContainer.clientWidth;
+        if (Math.abs(measuredWidth - lastMeasuredWidth) < 8)
+          return;
+        lastMeasuredWidth = measuredWidth;
+        if (resizeTimer !== null)
+          window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+          resizeTimer = null;
+          for (const state of pageStates.values())
+            clearPage(state);
+          updateAllPlaceholderSizes();
+          for (const state of pageStates.values()) {
+            if (state.visible)
+              void renderPage(state);
+          }
+        }, 180);
+      });
+      lastMeasuredWidth = scrollContainer.clientWidth;
+      resizeObserver.observe(scrollContainer);
+      updateCurrentPage(initialPage);
+      const initialState = pageStates.get(initialPage);
+      if (initialState) {
+        scrollContainer.scrollTop = Math.max(initialState.element.offsetTop - 8, 0);
+        initialState.visible = true;
+        await renderPage(initialState);
+      }
     } catch (error) {
       if (!destroyed) {
-        console.warn(
-          "Fast External Embed progressive PDF preview unavailable:",
-          error
+        console.error("Fast External Embed PDF viewer error:", error);
+        loadingStatus.setText(
+          `\u65E0\u6CD5\u8F7D\u5165 PDF\uFF1A${(error == null ? void 0 : error.message) || String(error)}`
         );
+        loadingStatus.addClass("is-error");
       }
     }
-    if (destroyed)
-      return;
-    if (!iframe.isConnected) {
-      session.destroy();
-      return;
-    }
-    const fullTransfer = this.localFileServer.waitForNextFullTransfer(
-      parsed.cleanTarget
-    );
-    iframe.src = fullUrl;
-    if (!previewRendered) {
-      session.destroy();
-      return;
-    }
-    await Promise.race([
-      fullTransfer,
-      new Promise((resolve2) => window.setTimeout(resolve2, 9e4))
-    ]);
-    if (destroyed || !preview.isConnected)
-      return;
-    await new Promise((resolve2) => window.setTimeout(resolve2, 700));
-    preview.addClass("is-complete");
-    window.setTimeout(() => session.destroy(), 220);
   }
   getMimeType(ext) {
     const map = {

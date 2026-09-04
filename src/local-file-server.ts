@@ -8,10 +8,6 @@ interface LocalResource {
   id: string;
   filePath: string;
   mimeType: string;
-  size: number;
-  mtimeMs: number;
-  fullyServed: boolean;
-  fullTransferWaiters: Set<() => void>;
 }
 
 interface ByteRange {
@@ -50,38 +46,15 @@ export class LocalFileServer {
         id,
         filePath: normalizedPath,
         mimeType,
-        size: stat.size,
-        mtimeMs: stat.mtimeMs,
-        fullyServed: false,
-        fullTransferWaiters: new Set(),
       });
     } else {
       const resource = this.resourcesById.get(id);
-      if (resource) {
-        resource.mimeType = mimeType;
-        if (resource.size !== stat.size || resource.mtimeMs !== stat.mtimeMs) {
-          resource.size = stat.size;
-          resource.mtimeMs = stat.mtimeMs;
-          resource.fullyServed = false;
-        }
-      }
+      if (resource) resource.mimeType = mimeType;
     }
 
     const port = await this.ensureStarted();
     const encodedName = encodeURIComponent(path.basename(normalizedPath));
     return `http://127.0.0.1:${port}/resource/${this.sessionToken}/${id}/${encodedName}`;
-  }
-
-  public waitForNextFullTransfer(filePath: string): Promise<void> {
-    const normalizedPath = path.resolve(filePath);
-    const id = this.resourceIdByPath.get(normalizedPath);
-    const resource = id ? this.resourcesById.get(id) : null;
-    if (!resource) return Promise.resolve();
-
-    resource.fullyServed = false;
-    return new Promise<void>((resolve) => {
-      resource.fullTransferWaiters.add(resolve);
-    });
   }
 
   public cleanup(): void {
@@ -97,10 +70,6 @@ export class LocalFileServer {
 
     this.startPromise = null;
     this.port = null;
-    for (const resource of this.resourcesById.values()) {
-      for (const resolve of resource.fullTransferWaiters) resolve();
-      resource.fullTransferWaiters.clear();
-    }
     this.resourcesById.clear();
     this.resourceIdByPath.clear();
   }
@@ -210,7 +179,6 @@ export class LocalFileServer {
       };
 
       if (request.headers["if-none-match"] === etag && !request.headers.range) {
-        this.markFullyServed(resource);
         response.writeHead(304, commonHeaders);
         response.end();
         return;
@@ -245,10 +213,6 @@ export class LocalFileServer {
       if (request.method === "HEAD" || size === 0) {
         response.end();
         return;
-      }
-
-      if (!range) {
-        response.once("finish", () => this.markFullyServed(resource));
       }
 
       const stream = fs.createReadStream(resource.filePath, { start, end });
@@ -316,12 +280,6 @@ export class LocalFileServer {
     const fallback = path.basename(filePath).replace(/[^\x20-\x7E]/g, "_");
     const encoded = encodeURIComponent(path.basename(filePath));
     return `inline; filename="${fallback.replace(/["\\]/g, "_")}"; filename*=UTF-8''${encoded}`;
-  }
-
-  private markFullyServed(resource: LocalResource): void {
-    resource.fullyServed = true;
-    for (const resolve of resource.fullTransferWaiters) resolve();
-    resource.fullTransferWaiters.clear();
   }
 
   private sendNotFound(response: http.ServerResponse): void {

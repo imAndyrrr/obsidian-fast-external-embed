@@ -214,34 +214,9 @@ export class EmbedRenderer {
         pdfHost.style.height = customHeight;
         if (customWidth !== "100%") pdfHost.style.width = customWidth;
 
-        // Chromium 的完整 PDF 阅读器在后台载入；PDF.js 先按需读取并显示当前页，
-        // 避免非线性化的大 PDF 在完整传输前长时间只显示空白区域。
-        const iframe = pdfHost.createEl("iframe", {
-          cls: "fast-external-embed-pdf",
-          attr: {
-            frameborder: "0",
-            loading: "lazy",
-          },
-        });
-        iframe.style.setProperty("--fast-embed-pdf-height", customHeight);
-        iframe.style.height = "100%";
-
-        const preview = pdfHost.createDiv({
-          cls: "fast-external-pdf-preview",
-        });
-        const previewStatus = preview.createDiv({
-          cls: "fast-external-pdf-preview-status",
-          text: "正在按需读取当前页…",
-        });
-
-        void this.showProgressivePdfPreview(
-          parsed,
-          playableUrl,
-          fullUrl,
-          iframe,
-          preview,
-          previewStatus
-        );
+        // 使用 PDF.js 构建可滚动的按页阅读器。每一页在接近可见区域时才读取
+        // 所需的文件区段并渲染，不再等待 Chromium 完整下载整个 PDF。
+        void this.showProgressivePdfViewer(parsed, playableUrl, pdfHost);
       } else if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"].includes(parsed.extension)) {
         const img = body.createEl("img", {
           cls: "fast-external-embed-img",
@@ -409,74 +384,369 @@ export class EmbedRenderer {
     else setIcon(el, "file");
   }
 
-  private async showProgressivePdfPreview(
+  private async showProgressivePdfViewer(
     parsed: ParsedEmbedTarget,
     playableUrl: string,
-    fullUrl: string,
-    iframe: HTMLIFrameElement,
-    preview: HTMLElement,
-    status: HTMLElement
+    host: HTMLElement
   ): Promise<void> {
     let destroyed = false;
     let loadingTask: any = null;
-    let renderTask: any = null;
-    let visibilityObserver: IntersectionObserver | null = null;
-    let releaseVisibilityWait: (() => void) | null = null;
+    let documentProxy: any = null;
+    let hostObserver: IntersectionObserver | null = null;
+    let pageObserver: IntersectionObserver | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let releaseHostWait: (() => void) | null = null;
     let disconnectTimer: number | null = null;
+    let resizeTimer: number | null = null;
+    let scrollFrame: number | null = null;
+    let lastMeasuredWidth = 0;
+    let zoom = 1;
+    let baseAspectRatio = 1.414;
+    let currentPage = 1;
+
+    interface PageState {
+      pageNumber: number;
+      element: HTMLElement;
+      surface: HTMLElement;
+      status: HTMLElement;
+      canvas: HTMLCanvasElement | null;
+      renderTask: any;
+      loading: Promise<void> | null;
+      visible: boolean;
+      lastVisibleAt: number;
+      aspectRatio: number;
+      renderedZoom: number | null;
+    }
+
+    const pageStates = new Map<number, PageState>();
+    const toolbar = host.createDiv({ cls: "fast-external-pdf-toolbar" });
+    const previousButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "上一页", title: "上一页" },
+    });
+    setIcon(previousButton, "chevron-up");
+
+    const pageInput = toolbar.createEl("input", {
+      cls: "fast-external-pdf-page-input",
+      type: "number",
+      attr: { min: "1", value: "1", "aria-label": "当前页" },
+    });
+    const pageTotal = toolbar.createEl("span", {
+      cls: "fast-external-pdf-page-total",
+      text: "/ …",
+    });
+
+    const nextButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "下一页", title: "下一页" },
+    });
+    setIcon(nextButton, "chevron-down");
+
+    toolbar.createDiv({ cls: "fast-external-pdf-toolbar-spacer" });
+
+    const zoomOutButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "缩小", title: "缩小" },
+    });
+    setIcon(zoomOutButton, "zoom-out");
+    const zoomLabel = toolbar.createEl("span", {
+      cls: "fast-external-pdf-zoom-label",
+      text: "100%",
+    });
+    const zoomInButton = toolbar.createEl("button", {
+      cls: "fast-external-pdf-tool-button",
+      attr: { "aria-label": "放大", title: "放大" },
+    });
+    setIcon(zoomInButton, "zoom-in");
+
+    const scrollContainer = host.createDiv({
+      cls: "fast-external-pdf-scroll",
+    });
+    const loadingStatus = scrollContainer.createDiv({
+      cls: "fast-external-pdf-loading",
+      text: "正在读取 PDF 目录…",
+    });
+    const pagesContainer = scrollContainer.createDiv({
+      cls: "fast-external-pdf-pages",
+    });
+
+    const cancelPage = (state: PageState) => {
+      try {
+        state.renderTask?.cancel?.();
+      } catch (_) {
+        // Ignore cancellation races.
+      }
+      state.renderTask = null;
+      state.loading = null;
+    };
+
+    const clearPage = (state: PageState) => {
+      cancelPage(state);
+      state.canvas?.remove();
+      state.canvas = null;
+      state.renderedZoom = null;
+      state.status.removeClass("is-hidden");
+      state.status.setText(`第 ${state.pageNumber} 页`);
+    };
+
     const session = {
       destroy: () => {
         if (destroyed) return;
         destroyed = true;
-        visibilityObserver?.disconnect();
-        visibilityObserver = null;
-        releaseVisibilityWait?.();
-        releaseVisibilityWait = null;
+        hostObserver?.disconnect();
+        hostObserver = null;
+        pageObserver?.disconnect();
+        pageObserver = null;
+        resizeObserver?.disconnect();
+        resizeObserver = null;
+        releaseHostWait?.();
+        releaseHostWait = null;
         if (disconnectTimer !== null) {
           window.clearInterval(disconnectTimer);
           disconnectTimer = null;
         }
-        try {
-          renderTask?.cancel?.();
-        } catch (_) {
-          // Ignore cancellation races.
+        if (resizeTimer !== null) {
+          window.clearTimeout(resizeTimer);
+          resizeTimer = null;
+        }
+        if (scrollFrame !== null) {
+          window.cancelAnimationFrame(scrollFrame);
+          scrollFrame = null;
+        }
+        for (const state of pageStates.values()) {
+          cancelPage(state);
         }
         void loadingTask?.destroy?.();
-        preview.remove();
+        documentProxy = null;
         this.pdfPreviewSessions.delete(session);
       },
     };
     this.pdfPreviewSessions.add(session);
     disconnectTimer = window.setInterval(() => {
-      if (!preview.isConnected || !iframe.isConnected) session.destroy();
+      if (!host.isConnected) session.destroy();
     }, 1_000);
 
-    let previewRendered = false;
-    try {
-      const rect = preview.getBoundingClientRect();
-      const isNearViewport =
-        rect.bottom >= -800 && rect.top <= window.innerHeight + 800;
-      if (!isNearViewport && "IntersectionObserver" in window) {
-        await new Promise<void>((resolve) => {
-          releaseVisibilityWait = resolve;
-          visibilityObserver = new IntersectionObserver(
-            (entries) => {
-              if (entries.some((entry) => entry.isIntersecting)) resolve();
-            },
-            { rootMargin: "800px 0px" }
-          );
-          visibilityObserver.observe(preview);
-        });
-        releaseVisibilityWait = null;
-        visibilityObserver?.disconnect();
-        visibilityObserver = null;
+    const waitUntilNearViewport = async () => {
+      const rect = host.getBoundingClientRect();
+      if (rect.bottom >= -800 && rect.top <= window.innerHeight + 800) return;
+      if (!("IntersectionObserver" in window)) return;
+
+      await new Promise<void>((resolve) => {
+        releaseHostWait = resolve;
+        hostObserver = new IntersectionObserver(
+          (entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) resolve();
+          },
+          { rootMargin: "800px 0px" }
+        );
+        hostObserver.observe(host);
+      });
+      releaseHostWait = null;
+      hostObserver?.disconnect();
+      hostObserver = null;
+    };
+
+    const availablePageWidth = () =>
+      Math.max(scrollContainer.clientWidth - 32, 320);
+
+    const updatePlaceholderSize = (state: PageState) => {
+      const width = availablePageWidth() * zoom;
+      const height = width * state.aspectRatio;
+      state.element.style.width = `${Math.round(width)}px`;
+      state.element.style.minHeight = `${Math.round(height)}px`;
+    };
+
+    const updateAllPlaceholderSizes = () => {
+      for (const state of pageStates.values()) updatePlaceholderSize(state);
+    };
+
+    const updateCurrentPage = (pageNumber: number) => {
+      currentPage = Math.min(
+        Math.max(pageNumber, 1),
+        documentProxy?.numPages || 1
+      );
+      pageInput.value = String(currentPage);
+      previousButton.disabled = currentPage <= 1;
+      nextButton.disabled =
+        !documentProxy || currentPage >= documentProxy.numPages;
+    };
+
+    const updateCurrentPageFromScroll = () => {
+      scrollFrame = null;
+      if (!documentProxy || pageStates.size === 0) return;
+
+      const readingLine =
+        scrollContainer.scrollTop + scrollContainer.clientHeight * 0.3;
+      let closestPage = 1;
+      let closestDistance = Number.POSITIVE_INFINITY;
+      for (const state of pageStates.values()) {
+        const pageCenter =
+          state.element.offsetTop + state.element.offsetHeight * 0.5;
+        const distance = Math.abs(pageCenter - readingLine);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestPage = state.pageNumber;
+        }
       }
-      if (destroyed || !preview.isConnected) {
+      updateCurrentPage(closestPage);
+    };
+
+    scrollContainer.addEventListener("scroll", () => {
+      if (scrollFrame !== null) return;
+      scrollFrame = window.requestAnimationFrame(updateCurrentPageFromScroll);
+    });
+
+    const evictDistantPages = () => {
+      const rendered = [...pageStates.values()].filter(
+        (state) => state.canvas && !state.visible
+      );
+      if (rendered.length <= 8) return;
+
+      rendered
+        .sort((a, b) => {
+          const distanceA = Math.abs(a.pageNumber - currentPage);
+          const distanceB = Math.abs(b.pageNumber - currentPage);
+          if (distanceA !== distanceB) return distanceB - distanceA;
+          return a.lastVisibleAt - b.lastVisibleAt;
+        })
+        .slice(0, rendered.length - 8)
+        .forEach(clearPage);
+    };
+
+    const renderPage = (state: PageState): Promise<void> => {
+      if (
+        destroyed ||
+        !documentProxy ||
+        state.loading ||
+        state.renderedZoom === zoom
+      ) {
+        return state.loading || Promise.resolve();
+      }
+
+      state.loading = (async () => {
+        clearPage(state);
+        state.status.setText(`正在读取第 ${state.pageNumber} 页…`);
+
+        const page = await documentProxy.getPage(state.pageNumber);
+        if (destroyed || !state.element.isConnected) return;
+
+        const baseViewport = page.getViewport({ scale: 1 });
+        state.aspectRatio = baseViewport.height / baseViewport.width;
+        updatePlaceholderSize(state);
+
+        const cssWidth = availablePageWidth() * zoom;
+        const cssScale = cssWidth / baseViewport.width;
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        const renderViewport = page.getViewport({
+          scale: cssScale * pixelRatio,
+        });
+
+        const canvas = state.surface.createEl("canvas");
+        canvas.width = Math.ceil(renderViewport.width);
+        canvas.height = Math.ceil(renderViewport.height);
+        canvas.style.width = `${Math.ceil(renderViewport.width / pixelRatio)}px`;
+        canvas.style.height = `${Math.ceil(
+          renderViewport.height / pixelRatio
+        )}px`;
+
+        const canvasContext = canvas.getContext("2d");
+        if (!canvasContext) throw new Error("无法创建 PDF 页面画布");
+
+        state.canvas = canvas;
+        state.renderTask = page.render({
+          canvas,
+          canvasContext,
+          viewport: renderViewport,
+          background: "rgb(255,255,255)",
+        });
+        await state.renderTask.promise;
+        if (destroyed || state.canvas !== canvas) return;
+
+        state.renderedZoom = zoom;
+        state.status.addClass("is-hidden");
+        state.lastVisibleAt = Date.now();
+        state.renderTask = null;
+        page.cleanup?.();
+        evictDistantPages();
+      })()
+        .catch((error: any) => {
+          if (error?.name !== "RenderingCancelledException" && !destroyed) {
+            console.warn(
+              `Fast External Embed could not render PDF page ${state.pageNumber}:`,
+              error
+            );
+            state.status.setText(`第 ${state.pageNumber} 页载入失败`);
+          }
+        })
+        .finally(() => {
+          state.loading = null;
+        });
+
+      return state.loading;
+    };
+
+    const goToPage = (pageNumber: number) => {
+      const state = pageStates.get(
+        Math.min(Math.max(pageNumber, 1), documentProxy?.numPages || 1)
+      );
+      if (!state) return;
+      updateCurrentPage(state.pageNumber);
+      scrollContainer.scrollTo({
+        top: Math.max(state.element.offsetTop - 8, 0),
+        behavior: "smooth",
+      });
+      void renderPage(state);
+    };
+
+    const setZoom = (nextZoom: number) => {
+      const bounded = Math.min(Math.max(nextZoom, 0.5), 2.5);
+      if (Math.abs(bounded - zoom) < 0.001) return;
+      zoom = bounded;
+      zoomLabel.setText(`${Math.round(zoom * 100)}%`);
+      for (const state of pageStates.values()) clearPage(state);
+      updateAllPlaceholderSizes();
+      for (const state of pageStates.values()) {
+        if (state.visible) void renderPage(state);
+      }
+      requestAnimationFrame(() => goToPage(currentPage));
+    };
+
+    previousButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      goToPage(currentPage - 1);
+    });
+    nextButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      goToPage(currentPage + 1);
+    });
+    pageInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      const requested = Number.parseInt(pageInput.value, 10);
+      if (Number.isFinite(requested)) goToPage(requested);
+      else updateCurrentPage(currentPage);
+    });
+    zoomOutButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setZoom(zoom - 0.15);
+    });
+    zoomInButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setZoom(zoom + 0.15);
+    });
+    zoomLabel.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setZoom(1);
+    });
+
+    try {
+      await waitUntilNearViewport();
+      if (destroyed || !host.isConnected) {
         session.destroy();
         return;
       }
 
       const pdfjsLib = await loadPdfJs();
-      if (destroyed || !preview.isConnected) {
+      if (destroyed || !host.isConnected) {
         session.destroy();
         return;
       }
@@ -491,94 +761,121 @@ export class EmbedRenderer {
         wasmUrl: new URL("lib/pdfjs/wasm/", window.location.href).href,
       });
 
-      const pdfDocument = await loadingTask.promise;
-      if (destroyed || !preview.isConnected) {
+      documentProxy = await loadingTask.promise;
+      if (destroyed || !host.isConnected) {
         session.destroy();
         return;
       }
 
       const requestedPage = Number.parseInt(parsed.params.page || "1", 10);
-      const pageNumber = Math.min(
+      const initialPage = Math.min(
         Math.max(Number.isFinite(requestedPage) ? requestedPage : 1, 1),
-        pdfDocument.numPages
+        documentProxy.numPages
       );
-      const page = await pdfDocument.getPage(pageNumber);
-      if (destroyed || !preview.isConnected) {
-        session.destroy();
-        return;
+      currentPage = initialPage;
+      pageInput.max = String(documentProxy.numPages);
+      pageTotal.setText(`/ ${documentProxy.numPages}`);
+
+      const firstPage = await documentProxy.getPage(initialPage);
+      const firstViewport = firstPage.getViewport({ scale: 1 });
+      baseAspectRatio = firstViewport.height / firstViewport.width;
+      firstPage.cleanup?.();
+
+      loadingStatus.remove();
+
+      for (let pageNumber = 1; pageNumber <= documentProxy.numPages; pageNumber++) {
+        const element = pagesContainer.createDiv({
+          cls: "fast-external-pdf-page",
+          attr: {
+            "data-page-number": String(pageNumber),
+            "aria-label": `第 ${pageNumber} 页`,
+          },
+        });
+        const surface = element.createDiv({
+          cls: "fast-external-pdf-page-surface",
+        });
+        const status = surface.createDiv({
+          cls: "fast-external-pdf-page-status",
+          text: `第 ${pageNumber} 页`,
+        });
+        const state: PageState = {
+          pageNumber,
+          element,
+          surface,
+          status,
+          canvas: null,
+          renderTask: null,
+          loading: null,
+          visible: false,
+          lastVisibleAt: 0,
+          aspectRatio: baseAspectRatio,
+          renderedZoom: null,
+        };
+        pageStates.set(pageNumber, state);
+        updatePlaceholderSize(state);
       }
 
-      const baseViewport = page.getViewport({ scale: 1 });
-      const availableWidth = Math.max(preview.clientWidth - 32, 320);
-      const cssScale = Math.min(availableWidth / baseViewport.width, 2);
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const renderViewport = page.getViewport({
-        scale: cssScale * pixelRatio,
-      });
-
-      const canvasWrap = preview.createDiv({
-        cls: "fast-external-pdf-preview-canvas-wrap",
-      });
-      const canvas = canvasWrap.createEl("canvas");
-      canvas.width = Math.ceil(renderViewport.width);
-      canvas.height = Math.ceil(renderViewport.height);
-      canvas.style.width = `${Math.ceil(renderViewport.width / pixelRatio)}px`;
-      canvas.style.height = `${Math.ceil(renderViewport.height / pixelRatio)}px`;
-
-      const canvasContext = canvas.getContext("2d");
-      if (!canvasContext) throw new Error("无法创建 PDF 预览画布");
-
-      renderTask = page.render({
-        canvas,
-        canvasContext,
-        viewport: renderViewport,
-        background: "rgb(255,255,255)",
-      });
-      await renderTask.promise;
-      if (destroyed || !preview.isConnected) {
-        session.destroy();
-        return;
+      pageObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            const pageNumber = Number.parseInt(
+              (entry.target as HTMLElement).dataset.pageNumber || "",
+              10
+            );
+            const state = pageStates.get(pageNumber);
+            if (!state) continue;
+            state.visible = entry.isIntersecting;
+            if (entry.isIntersecting) {
+              state.lastVisibleAt = Date.now();
+              void renderPage(state);
+            }
+          }
+          evictDistantPages();
+        },
+        {
+          root: scrollContainer,
+          rootMargin: "100% 0px",
+          threshold: [0, 0.1, 0.25, 0.5, 0.75],
+        }
+      );
+      for (const state of pageStates.values()) {
+        pageObserver.observe(state.element);
       }
 
-      previewRendered = true;
-      preview.addClass("is-ready");
-      status.setText(
-        `第 ${pageNumber} / ${pdfDocument.numPages} 页 · 完整阅读器正在后台载入`
-      );
+      resizeObserver = new ResizeObserver(() => {
+        if (destroyed) return;
+        const measuredWidth = scrollContainer.clientWidth;
+        if (Math.abs(measuredWidth - lastMeasuredWidth) < 8) return;
+        lastMeasuredWidth = measuredWidth;
+        if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+          resizeTimer = null;
+          for (const state of pageStates.values()) clearPage(state);
+          updateAllPlaceholderSizes();
+          for (const state of pageStates.values()) {
+            if (state.visible) void renderPage(state);
+          }
+        }, 180);
+      });
+      lastMeasuredWidth = scrollContainer.clientWidth;
+      resizeObserver.observe(scrollContainer);
+
+      updateCurrentPage(initialPage);
+      const initialState = pageStates.get(initialPage);
+      if (initialState) {
+        scrollContainer.scrollTop = Math.max(initialState.element.offsetTop - 8, 0);
+        initialState.visible = true;
+        await renderPage(initialState);
+      }
     } catch (error) {
       if (!destroyed) {
-        console.warn(
-          "Fast External Embed progressive PDF preview unavailable:",
-          error
+        console.error("Fast External Embed PDF viewer error:", error);
+        loadingStatus.setText(
+          `无法载入 PDF：${(error as any)?.message || String(error)}`
         );
+        loadingStatus.addClass("is-error");
       }
     }
-
-    if (destroyed) return;
-    if (!iframe.isConnected) {
-      session.destroy();
-      return;
-    }
-
-    const fullTransfer = this.localFileServer.waitForNextFullTransfer(
-      parsed.cleanTarget
-    );
-    iframe.src = fullUrl;
-
-    if (!previewRendered) {
-      session.destroy();
-      return;
-    }
-
-    await Promise.race([
-      fullTransfer,
-      new Promise<void>((resolve) => window.setTimeout(resolve, 90_000)),
-    ]);
-    if (destroyed || !preview.isConnected) return;
-
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 700));
-    preview.addClass("is-complete");
-    window.setTimeout(() => session.destroy(), 220);
   }
 
   private getMimeType(ext: string): string {

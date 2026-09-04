@@ -62,9 +62,9 @@ Or add a height parameter to a local file:
 
 ## Performance
 
-Local PDFs are served through a loopback-only, session-token-protected endpoint with HTTP byte-range support. A range-loaded preview displays the requested page first, while Chromium's complete PDF viewer continues loading in the background. The plugin no longer has to copy the complete PDF into an in-memory Blob before anything can be displayed, which improves first-page latency and substantially reduces memory pressure for large PDFs.
+Local PDFs are served through a loopback-only, session-token-protected endpoint with HTTP byte-range support. The built-in PDF.js reader renders pages as they approach the visible area, so you can scroll and continue reading without waiting for the complete file to load. The plugin no longer has to copy the complete PDF into an in-memory Blob before anything can be displayed, which improves first-page latency and substantially reduces memory pressure for large PDFs.
 
-PDFs outside the visible area are deferred until they approach the viewport, reducing unnecessary work in notes containing multiple embeds.
+PDFs outside the visible area and pages far from the current scroll position are deferred, reducing unnecessary work in notes containing multiple or very large documents.
 
 Other compatible local media types currently continue to use short-lived in-memory Blob URLs. Close the note or reload the plugin to release cached local media data.
 
