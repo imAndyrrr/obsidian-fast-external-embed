@@ -285,8 +285,9 @@ var LocalFileServer = class {
 
 // src/renderer.ts
 var EmbedRenderer = class {
-  constructor(getSetting) {
+  constructor(getSetting, onEditSource) {
     this.getSetting = getSetting;
+    this.onEditSource = onEditSource;
     this.blobCache = /* @__PURE__ */ new Map();
     this.maxCacheSize = 200 * 1024 * 1024;
     // 200MB 内存缓存上限
@@ -371,7 +372,18 @@ var EmbedRenderer = class {
           dimensions.width = `${dimMatch[1]}px`;
       }
     }
-    const extension = path2.extname(cleanTarget).toLowerCase();
+    let extension = path2.extname(cleanTarget).toLowerCase();
+    if (!extension && (isHttp || isFileProtocol)) {
+      const fullUrlLower = str.toLowerCase();
+      const imageFormats = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"];
+      for (const fmt of imageFormats) {
+        const fmtRegex = new RegExp(`(?:[?&](?:wx_fmt|tp|format|f|ext)=|mmbiz_|/image/)(${fmt})(?:[&/#]|$)`, "i");
+        if (fmtRegex.test(fullUrlLower)) {
+          extension = `.${fmt}`;
+          break;
+        }
+      }
+    }
     return {
       isExternal: true,
       isHttp,
@@ -439,6 +451,17 @@ var EmbedRenderer = class {
           e.stopPropagation();
           window.open(parsed.cleanTarget, "_blank");
         });
+        if (this.onEditSource) {
+          const editBtn = actions.createEl("button", {
+            cls: "fast-external-embed-btn",
+            text: "\u7F16\u8F91\u6E90\u7801"
+          });
+          editBtn.setAttribute("title", "\u5728\u5B9E\u65F6\u9884\u89C8\u4E2D\u4FEE\u6539\u6B64\u533A\u5757/\u94FE\u63A5");
+          editBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this.onEditSource(container);
+          });
+        }
       }
     }
     const body = container.createEl("div", { cls: "fast-external-embed-body" });
@@ -1090,7 +1113,10 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
   }
   async onload() {
     await this.loadSettings();
-    this.renderer = new EmbedRenderer((key) => this.settings[key]);
+    this.renderer = new EmbedRenderer(
+      (key) => this.settings[key],
+      (container) => this.focusSourceInLivePreview(container)
+    );
     this.registerMarkdownPostProcessor((element, context) => {
       this.scanAndReplaceEmbeds(element);
       this.scanAndEnhanceExternalLinks(element);
@@ -1321,6 +1347,29 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
     if (aliasIndex !== -1)
       target = target.slice(0, aliasIndex).trim();
     return target || null;
+  }
+  /**
+   * 在实时预览中将光标定位至对应嵌入块的位置，从而展开 Markdown 源码供用户修改。
+   */
+  focusSourceInLivePreview(containerEl) {
+    var _a;
+    const editor = (_a = this.app.workspace.activeEditor) == null ? void 0 : _a.editor;
+    const cm = editor == null ? void 0 : editor.cm;
+    if (!cm || typeof cm.posAtDOM !== "function")
+      return;
+    try {
+      const targetNode = containerEl.closest(".cm-line, .cm-embed-block, .image-embed") || containerEl;
+      const position = cm.posAtDOM(targetNode, 0);
+      if (typeof position === "number" && position >= 0) {
+        cm.dispatch({
+          selection: { anchor: position, head: position },
+          scrollIntoView: true
+        });
+        cm.focus();
+      }
+    } catch (err) {
+      console.warn("Fast External Embed could not focus source line:", err);
+    }
   }
 };
 var FastExternalEmbedSettingTab = class extends import_obsidian2.PluginSettingTab {

@@ -18,15 +18,22 @@
 /* Obsidian 自带的外层容器不画框，避免和插件容器叠出多层边框 */
 .image-embed.fast-external-embed-host,
 .image-wrapper.fast-external-embed-host {
-  display: block !important;
+  display: block;
   width: 100% !important;
   max-width: 100% !important;
-  margin: 0 !important;
-  border: none !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  padding: 0 !important;
+  position: relative !important;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+/* 确保 Obsidian 原生 .embed-actions 悬浮操作栏（编辑这个区块、放大）位于顶层可见 */
+.image-embed.fast-external-embed-host .embed-actions {
+  z-index: 10 !important;
+  pointer-events: auto !important;
 }
 
 /* 嵌入网页 iframe 默认撑满容器宽度 */

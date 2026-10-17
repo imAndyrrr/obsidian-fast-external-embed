@@ -30,7 +30,10 @@ export default class FastExternalEmbedPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
-    this.renderer = new EmbedRenderer((key: string) => (this.settings as any)[key]);
+    this.renderer = new EmbedRenderer(
+      (key: string) => (this.settings as any)[key],
+      (container: HTMLElement) => this.focusSourceInLivePreview(container)
+    );
 
     // 1. 注册 Reading View（阅读模式）后处理器
     this.registerMarkdownPostProcessor((element: HTMLElement, context: MarkdownPostProcessorContext) => {
@@ -310,6 +313,29 @@ export default class FastExternalEmbedPlugin extends Plugin {
     if (aliasIndex !== -1) target = target.slice(0, aliasIndex).trim();
 
     return target || null;
+  }
+
+  /**
+   * 在实时预览中将光标定位至对应嵌入块的位置，从而展开 Markdown 源码供用户修改。
+   */
+  private focusSourceInLivePreview(containerEl: HTMLElement) {
+    const editor = this.app.workspace.activeEditor?.editor as any;
+    const cm = editor?.cm;
+    if (!cm || typeof cm.posAtDOM !== "function") return;
+
+    try {
+      const targetNode = containerEl.closest(".cm-line, .cm-embed-block, .image-embed") || containerEl;
+      const position = cm.posAtDOM(targetNode, 0);
+      if (typeof position === "number" && position >= 0) {
+        cm.dispatch({
+          selection: { anchor: position, head: position },
+          scrollIntoView: true,
+        });
+        cm.focus();
+      }
+    } catch (err) {
+      console.warn("Fast External Embed could not focus source line:", err);
+    }
   }
 }
 

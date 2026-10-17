@@ -22,7 +22,10 @@ export class EmbedRenderer {
   private localFileServer = new LocalFileServer();
   private pdfPreviewSessions = new Set<{ destroy: () => void }>();
 
-  constructor(private getSetting: (key: string) => any) {}
+  constructor(
+    private getSetting: (key: string) => any,
+    private onEditSource?: (container: HTMLElement) => void
+  ) {}
 
   /**
    * 解析嵌入目标文本
@@ -116,7 +119,21 @@ export class EmbedRenderer {
       }
     }
 
-    const extension = path.extname(cleanTarget).toLowerCase();
+    let extension = path.extname(cleanTarget).toLowerCase();
+
+    // 如果没有识别出普通后缀，针对无后缀图片 URL（如微信图片、各类 CDN 带参数的动态图片）进行智能识别
+    if (!extension && (isHttp || isFileProtocol)) {
+      const fullUrlLower = str.toLowerCase();
+      const imageFormats = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"];
+      for (const fmt of imageFormats) {
+        // 匹配如 ?wx_fmt=png, &tp=webp, &format=jpg, /mmbiz_png/ 等
+        const fmtRegex = new RegExp(`(?:[?&](?:wx_fmt|tp|format|f|ext)=|mmbiz_|/image/)(${fmt})(?:[&/#]|$)`, "i");
+        if (fmtRegex.test(fullUrlLower)) {
+          extension = `.${fmt}`;
+          break;
+        }
+      }
+    }
 
     return {
       isExternal: true,
@@ -200,6 +217,18 @@ export class EmbedRenderer {
           e.stopPropagation();
           window.open(parsed.cleanTarget, "_blank");
         });
+
+        if (this.onEditSource) {
+          const editBtn = actions.createEl("button", {
+            cls: "fast-external-embed-btn",
+            text: "编辑源码",
+          });
+          editBtn.setAttribute("title", "在实时预览中修改此区块/链接");
+          editBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this.onEditSource!(container);
+          });
+        }
       }
     }
 

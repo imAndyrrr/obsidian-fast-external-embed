@@ -1,6 +1,6 @@
 {
   "name": "obsidian-fast-external-embed",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Embed external web pages and local files with standard Markdown and wiki embed syntax.",
   "main": "main.js",
   "scripts": {
