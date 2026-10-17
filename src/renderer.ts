@@ -15,6 +15,10 @@ export interface ParsedEmbedTarget {
   dimensions?: { width?: string; height?: string };
 }
 
+export const IMAGE_EXTENSIONS = [
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".avif"
+];
+
 export class EmbedRenderer {
   private blobCache: Map<string, { url: string; size: number; timestamp: number }> = new Map();
   private maxCacheSize: number = 200 * 1024 * 1024; // 200MB 内存缓存上限
@@ -252,6 +256,7 @@ export class EmbedRenderer {
           attr: { src: fullUrl },
           title: parsed.alt || "",
         });
+        img.setAttribute("data-fast-embed-processed", "true");
         if (parsed.dimensions?.width) img.style.width = parsed.dimensions.width;
       } else if ([".mp4", ".webm", ".mkv", ".mov"].includes(parsed.extension)) {
         const video = body.createEl("video", {

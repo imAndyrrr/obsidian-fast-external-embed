@@ -5,7 +5,7 @@ import {
   PluginSettingTab,
   Setting,
 } from "obsidian";
-import { EmbedRenderer } from "./renderer";
+import { EmbedRenderer, IMAGE_EXTENSIONS } from "./renderer";
 
 interface FastExternalEmbedSettings {
   showHeader: boolean;
@@ -188,8 +188,17 @@ export default class FastExternalEmbedPlugin extends Plugin {
 
       const parsed = this.renderer.parseTarget(src, alt);
       if (parsed) {
-        const nonImgExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
-        if (parsed.isHttp || nonImgExts.includes(parsed.extension)) {
+        // 如果识别为图片类型，原生 <img> 已经完全原生高效支持渲染，切勿替换为容器！
+        // 直接标记已处理，保留原生渲染与实时编辑体验。
+        if (IMAGE_EXTENSIONS.includes(parsed.extension)) {
+          img.setAttribute("data-fast-embed-processed", "true");
+          return;
+        }
+
+        // 只有当目标是非图片资源（如普通网页嵌入、PDF、音视频）时，原生 <img> 无法显示，才替换为容器
+        const nonImgMediaExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
+        const isHtmlPage = parsed.isHttp && !parsed.extension;
+        if (isHtmlPage || nonImgMediaExts.includes(parsed.extension)) {
           img.setAttribute("data-fast-embed-processed", "true");
           const container = document.createElement("div");
           img.replaceWith(container);

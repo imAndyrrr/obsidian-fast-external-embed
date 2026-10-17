@@ -284,6 +284,17 @@ var LocalFileServer = class {
 };
 
 // src/renderer.ts
+var IMAGE_EXTENSIONS = [
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".svg",
+  ".bmp",
+  ".ico",
+  ".avif"
+];
 var EmbedRenderer = class {
   constructor(getSetting, onEditSource) {
     this.getSetting = getSetting;
@@ -480,6 +491,7 @@ var EmbedRenderer = class {
           attr: { src: fullUrl },
           title: parsed.alt || ""
         });
+        img.setAttribute("data-fast-embed-processed", "true");
         if ((_d = parsed.dimensions) == null ? void 0 : _d.width)
           img.style.width = parsed.dimensions.width;
       } else if ([".mp4", ".webm", ".mkv", ".mov"].includes(parsed.extension)) {
@@ -1245,8 +1257,13 @@ var FastExternalEmbedPlugin = class extends import_obsidian2.Plugin {
           return;
         const parsed = this.renderer.parseTarget(src, alt);
         if (parsed) {
-          const nonImgExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
-          if (parsed.isHttp || nonImgExts.includes(parsed.extension)) {
+          if (IMAGE_EXTENSIONS.includes(parsed.extension)) {
+            img.setAttribute("data-fast-embed-processed", "true");
+            return;
+          }
+          const nonImgMediaExts = [".pdf", ".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".ogg", ".flac", ".m4a"];
+          const isHtmlPage = parsed.isHttp && !parsed.extension;
+          if (isHtmlPage || nonImgMediaExts.includes(parsed.extension)) {
             img.setAttribute("data-fast-embed-processed", "true");
             const container = document.createElement("div");
             img.replaceWith(container);

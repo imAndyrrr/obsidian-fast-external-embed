@@ -5,6 +5,7 @@
   display: block !important;
   width: 100% !important;
   max-width: 100% !important;
+  box-sizing: border-box !important;
   position: relative;
   margin: 1em 0;
   border: 1px solid var(--background-modifier-border);
@@ -65,6 +66,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 6px 12px;
   background-color: var(--background-secondary-alt);
   border-bottom: 1px solid var(--background-modifier-border);
@@ -76,6 +80,8 @@
 .fast-external-embed-title {
   display: flex;
   align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -85,6 +91,7 @@
 
 .fast-external-embed-actions {
   display: flex;
+  flex-shrink: 0;
   gap: 8px;
 }
 
